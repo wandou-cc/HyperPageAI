@@ -179,6 +179,9 @@ describe("floating panel page binding", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "保存" })).toBeVisible();
     });
+    expect(document.querySelector("#hyperpage-tool-panel")).toHaveStyle({
+      width: "420px",
+    });
     expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({
       target: "background",
       type: "set-panel-visibility",

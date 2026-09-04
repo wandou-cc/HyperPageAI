@@ -188,7 +188,7 @@ interface PanelHeightResizeSession {
 const VIEWPORT_EDGE_GAP = 8;
 const DRAG_START_DISTANCE = 4;
 const PANEL_MIN_WIDTH = 320;
-const PANEL_DEFAULT_WIDTH = 380;
+const PANEL_DEFAULT_WIDTH = 420;
 const PANEL_MIN_HEIGHT = 280;
 
 const EMPTY_PAGE_STATE: PageState = {
@@ -1657,7 +1657,7 @@ export function App({ initialOpen }: AppProps) {
                   }
                 : undefined
             }
-            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-[86px] flex min-h-24 w-[min(380px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
+            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-[86px] flex min-h-24 w-[min(420px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
             onPointerDown={handlePanelPointerDown}
             onPointerMove={handlePanelPointerMove}
             onPointerUp={handlePanelPointerEnd}

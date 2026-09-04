@@ -11,8 +11,8 @@ export default defineConfig({
     description: "__MSG_extensionDescription__",
     default_locale: "en",
     minimum_chrome_version: "116",
-    permissions: ["storage", "clipboardWrite", "contextMenus", "tabs"],
-    host_permissions: ["<all_urls>"],
+    permissions: ["storage", "clipboardWrite", "contextMenus"],
+    host_permissions: ["http://*/*", "https://*/*"],
     web_accessible_resources: [
       {
         resources: ["icon/16.png", "icon/32.png", "icon/48.png"],
