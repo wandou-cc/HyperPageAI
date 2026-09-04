@@ -1,0 +1,169 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+.hp-panel {
+  font-size: 14px;
+  line-height: 20px;
+  transform-origin: bottom right;
+  animation: hp-panel-enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.hp-launcher {
+  cursor: grab;
+  touch-action: none;
+  animation:
+    hp-launcher-enter 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    hp-launcher-breathe 3.6s ease-in-out 600ms infinite;
+}
+
+.hp-panel-drag-handle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.hp-launcher[data-dragging="true"],
+.hp-panel-drag-handle[data-dragging="true"] {
+  cursor: grabbing;
+}
+
+.hp-launcher[data-dragging="true"],
+.hp-panel[data-dragging="true"] {
+  animation: none;
+}
+
+.hp-view-enter,
+.hp-feedback,
+.hp-selection-content[data-expanded="true"] {
+  animation: hp-content-enter 160ms ease-out;
+}
+
+@keyframes hp-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+@keyframes hp-launcher-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.9);
+  }
+}
+
+@keyframes hp-launcher-breathe {
+  0%,
+  100% {
+    box-shadow: 0 10px 28px
+      color-mix(in oklch, var(--foreground) 14%, transparent);
+  }
+
+  50% {
+    box-shadow: 0 14px 36px
+      color-mix(in oklch, var(--foreground) 22%, transparent);
+  }
+}
+
+@keyframes hp-content-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+.hp-markdown {
+  overflow-wrap: anywhere;
+}
+
+.hp-markdown > :first-child {
+  margin-top: 0;
+}
+
+.hp-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.hp-markdown p,
+.hp-markdown ul,
+.hp-markdown ol,
+.hp-markdown pre,
+.hp-markdown blockquote {
+  margin: 0 0 10px;
+}
+
+.hp-markdown ul,
+.hp-markdown ol {
+  padding-left: 20px;
+}
+
+.hp-markdown a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.hp-markdown code {
+  border-radius: 4px;
+  background: var(--muted);
+  padding: 2px 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.hp-markdown pre {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted);
+  padding: 10px;
+}
+
+.hp-markdown pre code {
+  padding: 0;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid var(--background);
+  border-radius: 8px;
+  background: var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hp-panel,
+  .hp-launcher,
+  .hp-view-enter,
+  .hp-feedback,
+  .hp-selection-content[data-expanded="true"] {
+    animation: none;
+  }
+}
