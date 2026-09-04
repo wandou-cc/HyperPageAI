@@ -26,6 +26,11 @@ textarea {
   font-size: 14px;
   line-height: 20px;
   transform-origin: bottom right;
+  box-shadow:
+    0 2px 8px color-mix(in oklch, var(--foreground) 10%, transparent),
+    0 18px 46px color-mix(in oklch, var(--foreground) 18%, transparent),
+    0 36px 90px color-mix(in oklch, var(--foreground) 12%, transparent);
+  transition: box-shadow 180ms ease-out;
   animation: hp-panel-enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -52,8 +57,14 @@ textarea {
 }
 
 .hp-launcher[data-dragging="true"],
-.hp-panel[data-dragging="true"] {
+.hp-panel[data-dragging="true"],
+.hp-panel[data-resizing="true"] {
   animation: none;
+}
+
+.hp-panel[data-dragging="true"],
+.hp-panel[data-resizing="true"] {
+  transition: none;
 }
 
 .hp-view-enter,
@@ -165,5 +176,9 @@ textarea {
   .hp-feedback,
   .hp-selection-content[data-expanded="true"] {
     animation: none;
+  }
+
+  .hp-panel {
+    transition: none;
   }
 }

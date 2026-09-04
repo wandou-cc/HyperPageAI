@@ -27,7 +27,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   InputGroup,
@@ -133,6 +139,7 @@ export function SettingsView({ settings, onSaved }: SettingsViewProps) {
   );
   const [resultDisplayMode, setResultDisplayMode] =
     useState<ResultDisplayMode>(settings.resultDisplayMode);
+  const [allowMultiTab, setAllowMultiTab] = useState(settings.allowMultiTab);
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState<"models" | "test" | "save" | null>(null);
   const [notice, setNotice] = useState<
@@ -176,6 +183,7 @@ export function SettingsView({ settings, onSaved }: SettingsViewProps) {
       settings.provider?.targetLanguage ?? "Simplified Chinese",
     );
     setResultDisplayMode(settings.resultDisplayMode);
+    setAllowMultiTab(settings.allowMultiTab);
   }, [settings]);
 
   // Builds one validated provider object from the controlled form fields.
@@ -234,9 +242,11 @@ export function SettingsView({ settings, onSaved }: SettingsViewProps) {
       if (providerFieldsAreEmpty) {
         const nextSettings: StoredSettings = {
           version: SETTINGS_VERSION,
+          enabled: settings.enabled,
           locale,
           provider: null,
           resultDisplayMode,
+          allowMultiTab,
         };
         await saveSettings(nextSettings);
         onSaved(nextSettings);
@@ -246,9 +256,11 @@ export function SettingsView({ settings, onSaved }: SettingsViewProps) {
       const provider = getProvider();
       const nextSettings: StoredSettings = {
         version: SETTINGS_VERSION,
+        enabled: settings.enabled,
         locale,
         provider,
         resultDisplayMode,
+        allowMultiTab,
       };
       await saveSettings(nextSettings);
       onSaved(nextSettings);
@@ -488,6 +500,23 @@ export function SettingsView({ settings, onSaved }: SettingsViewProps) {
                   {t(locale, "inlineResult")}
                 </ToggleGroupItem>
               </ToggleGroup>
+            </Field>
+
+            <Field orientation="horizontal" data-disabled={busy !== null}>
+              <FieldContent>
+                <FieldLabel htmlFor="allow-multi-tab">
+                  {t(locale, "allowMultiTab")}
+                </FieldLabel>
+                <FieldDescription>
+                  {t(locale, "allowMultiTabDescription")}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                id="allow-multi-tab"
+                checked={allowMultiTab}
+                disabled={busy !== null}
+                onCheckedChange={setAllowMultiTab}
+              />
             </Field>
           </FieldGroup>
         </CardContent>

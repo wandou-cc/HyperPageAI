@@ -1,6 +1,12 @@
 import { browser } from "wxt/browser";
 
 import type {
+  AgentActionResult,
+  AgentBrowserState,
+  AgentContentRequest,
+  AgentContentResponse,
+  AgentPageCommand,
+  AgentPageCommandResult,
   BackgroundRequest,
   CommandResult,
   ContentEvent,
@@ -8,6 +14,8 @@ import type {
   ContentResponse,
   InlineAiRequest,
   Locale,
+  PageCommand,
+  PageCommandResult,
   PageState,
   ResultDisplayMode,
   SelectionSnapshot,
@@ -16,12 +24,6 @@ import type {
 } from "../shared/messages";
 import { createSelectionSnapshot } from "../shared/selection";
 import { formatError, t } from "../entrypoints/sidepanel/translations";
-
-interface HiddenChange {
-  element: HTMLElement;
-  displayValue: string;
-  displayPriority: string;
-}
 
 type EditableChange =
   | {
@@ -38,9 +40,17 @@ interface InlineActionTarget {
 }
 
 export class PageController {
+  private agentElements = new Map<number, HTMLElement>();
+  private agentLastUpdateTime = 0;
+  private automationMask: HTMLDivElement | null = null;
+  private automationTarget: HTMLDivElement | null = null;
+  private automationCursor: HTMLDivElement | null = null;
+  private automationClickRipple: HTMLDivElement | null = null;
   private selectedElement: Element | null = null;
+  private pageTaskElements = new Set<Element>();
   private hoveredElement: Element | null = null;
   private selecting = false;
+  private selectingPageTaskElement = false;
   private selectionRevision = 0;
   private overlayHost: HTMLDivElement;
   private overlayShadowRoot: ShadowRoot;
@@ -62,7 +72,6 @@ export class PageController {
   private floatingResultCloseButton: HTMLButtonElement;
   private resizeObserver: ResizeObserver;
   private mutationObserver: MutationObserver;
-  private hiddenChanges: HiddenChange[] = [];
   private editableChanges: EditableChange[] = [];
   private insertedResults: HTMLElement[] = [];
   private updateScheduled = false;
@@ -85,6 +94,7 @@ export class PageController {
     this.resultDisplayMode = settings.resultDisplayMode;
     this.overlayHost = document.createElement("div");
     this.overlayHost.dataset.hyperpageUi = "overlay";
+    this.overlayHost.dataset.pageAgentNotInteractive = "true";
     this.overlayHost.style.setProperty("all", "initial", "important");
     this.overlayHost.style.setProperty("display", "block", "important");
     this.overlayHost.style.setProperty("position", "fixed", "important");
@@ -113,6 +123,70 @@ export class PageController {
       .outline.selected {
         border-color: #18181b;
         box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72);
+      }
+      .automation-mask {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: none;
+        overflow: hidden;
+        pointer-events: auto;
+        background: transparent;
+        cursor: progress;
+      }
+      .automation-target {
+        position: fixed;
+        display: none;
+        box-sizing: border-box;
+        pointer-events: none;
+        border: 2px solid #2563eb;
+        border-radius: 4px;
+        background: rgba(37, 99, 235, 0.06);
+        box-shadow:
+          0 0 0 2px rgba(255, 255, 255, 0.9),
+          0 4px 14px rgba(0, 0, 0, 0.16);
+        transition:
+          left 160ms ease-out,
+          top 160ms ease-out,
+          width 160ms ease-out,
+          height 160ms ease-out;
+      }
+      .automation-cursor {
+        position: fixed;
+        display: none;
+        width: 20px;
+        height: 26px;
+        pointer-events: none;
+        filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.32));
+        transition: left 180ms ease-out, top 180ms ease-out;
+      }
+      .automation-cursor::before,
+      .automation-cursor::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        clip-path: polygon(0 0, 0 22px, 6px 16px, 10px 25px, 14px 23px, 10px 15px, 19px 15px);
+      }
+      .automation-cursor::before {
+        background: #18181b;
+      }
+      .automation-cursor::after {
+        inset: 2px 3px 4px 2px;
+        background: #ffffff;
+      }
+      .automation-click-ripple {
+        position: fixed;
+        display: none;
+        width: 18px;
+        height: 18px;
+        box-sizing: border-box;
+        pointer-events: none;
+        border: 2px solid #2563eb;
+        border-radius: 50%;
+      }
+      .automation-click-ripple.active {
+        display: block;
+        animation: hp-agent-click 360ms ease-out forwards;
       }
       .trigger,
       .menu {
@@ -268,6 +342,12 @@ export class PageController {
         outline: 2px solid #a1a1aa;
         outline-offset: 1px;
       }
+      .floating-result[data-variant="error"] {
+        border-color: #fca5a5;
+      }
+      .floating-result[data-variant="error"] .floating-result-header {
+        color: #b91c1c;
+      }
       :host([data-pending="true"]) button {
         cursor: wait;
         opacity: 0.55;
@@ -276,6 +356,16 @@ export class PageController {
         from {
           opacity: 0;
           transform: scale(0.92);
+        }
+      }
+      @keyframes hp-agent-click {
+        from {
+          opacity: 1;
+          transform: scale(0.35);
+        }
+        to {
+          opacity: 0;
+          transform: scale(2.2);
         }
       }
       @keyframes hp-menu-enter {
@@ -302,6 +392,12 @@ export class PageController {
         }
         .floating-result-header {
           border-bottom-color: #3f3f46;
+        }
+        .floating-result[data-variant="error"] {
+          border-color: #7f1d1d;
+        }
+        .floating-result[data-variant="error"] .floating-result-header {
+          color: #fca5a5;
         }
         .trigger:hover,
         .trigger:focus-visible,
@@ -525,6 +621,9 @@ export class PageController {
       this.scheduleOutlineUpdate(),
     );
     this.mutationObserver = new MutationObserver((records) => {
+      for (const element of this.pageTaskElements) {
+        if (!element.isConnected) this.pageTaskElements.delete(element);
+      }
       const selectedElement = this.selectedElement;
       if (selectedElement && !selectedElement.isConnected) {
         this.selectedElement = null;
@@ -624,10 +723,21 @@ export class PageController {
 
   // Receives typed commands from the extension background worker.
   private handleMessage = (
-    message: ContentRequest,
+    message: ContentRequest | AgentContentRequest,
     _sender: Browser.runtime.MessageSender,
-    sendResponse: (response?: ContentResponse) => void,
-  ): void => {
+    sendResponse: (response?: ContentResponse | AgentContentResponse) => void,
+  ): true | undefined => {
+    if (message.target === "page-agent-content") {
+      void this.executeAgentCommand(message.command)
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((error: unknown) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      return true;
+    }
     if (message.target !== "content") return undefined;
     try {
       sendResponse({ ok: true, data: this.execute(message.command) });
@@ -637,13 +747,747 @@ export class PageController {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    return undefined;
   };
 
-  // Executes one page command against the controller's current selection state.
-  execute(command: ContentRequest["command"]): PageState {
+  // Creates the isolated automation indicators together with the interaction mask.
+  private ensureAutomationMask(): void {
+    if (this.automationMask) return;
+    this.automationMask = document.createElement("div");
+    this.automationMask.className = "automation-mask";
+    this.automationMask.dataset.hyperpageUi = "agent-mask";
+    this.automationMask.setAttribute("aria-hidden", "true");
+
+    this.automationTarget = document.createElement("div");
+    this.automationTarget.className = "automation-target";
+    this.automationTarget.dataset.hyperpageAutomationTarget = "true";
+    this.automationCursor = document.createElement("div");
+    this.automationCursor.className = "automation-cursor";
+    this.automationCursor.dataset.hyperpageAutomationCursor = "true";
+    this.automationClickRipple = document.createElement("div");
+    this.automationClickRipple.className = "automation-click-ripple";
+    this.automationClickRipple.dataset.hyperpageAutomationClick = "true";
+    this.automationMask.append(
+      this.automationTarget,
+      this.automationClickRipple,
+      this.automationCursor,
+    );
+    this.overlayShadowRoot.append(this.automationMask);
+  }
+
+  // Positions the target outline and simulated cursor from the live element box.
+  private showAutomationTarget(element: HTMLElement, clicking = false): void {
+    this.ensureAutomationMask();
+    if (
+      !this.automationMask ||
+      !this.automationTarget ||
+      !this.automationCursor ||
+      !this.automationClickRipple
+    ) {
+      throw new Error("Automation indicators are unavailable");
+    }
+
+    const rect = element.getBoundingClientRect();
+    const left = Math.max(0, rect.left);
+    const top = Math.max(0, rect.top);
+    const right = Math.min(window.innerWidth, rect.right);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    if (right <= left || bottom <= top) {
+      this.clearAutomationTarget();
+      return;
+    }
+
+    this.automationMask.style.cursor = "none";
+    this.automationTarget.style.left = `${left}px`;
+    this.automationTarget.style.top = `${top}px`;
+    this.automationTarget.style.width = `${right - left}px`;
+    this.automationTarget.style.height = `${bottom - top}px`;
+    this.automationTarget.style.display = "block";
+
+    const cursorX = Math.min(
+      Math.max(left + (right - left) / 2, 4),
+      window.innerWidth - 20,
+    );
+    const cursorY = Math.min(
+      Math.max(top + (bottom - top) / 2, 4),
+      window.innerHeight - 26,
+    );
+    this.automationCursor.style.left = `${cursorX}px`;
+    this.automationCursor.style.top = `${cursorY}px`;
+    this.automationCursor.style.display = "block";
+
+    if (clicking) {
+      this.automationClickRipple.style.left = `${cursorX - 9}px`;
+      this.automationClickRipple.style.top = `${cursorY - 9}px`;
+      this.automationClickRipple.style.removeProperty("display");
+      this.automationClickRipple.classList.remove("active");
+      void this.automationClickRipple.offsetWidth;
+      this.automationClickRipple.classList.add("active");
+    }
+  }
+
+  // Hides target-specific feedback while keeping the task cursor available.
+  private clearAutomationTarget(): void {
+    if (this.automationTarget) this.automationTarget.style.display = "none";
+    if (this.automationClickRipple) {
+      this.automationClickRipple.classList.remove("active");
+      this.automationClickRipple.style.display = "none";
+    }
+  }
+
+  // Clears one finished action while leaving the blocking task mask in place.
+  private clearAutomationActionFeedback(): void {
+    this.clearAutomationTarget();
+    if (this.automationCursor) this.automationCursor.style.display = "none";
+    if (this.automationMask) this.automationMask.style.cursor = "progress";
+  }
+
+  // Removes the automation surface and every indicator owned by it.
+  private removeAutomationMask(): void {
+    this.automationMask?.remove();
+    this.automationMask = null;
+    this.automationTarget = null;
+    this.automationCursor = null;
+    this.automationClickRipple = null;
+  }
+
+  // Executes one indexed DOM command for the background-hosted page agent.
+  private async executeAgentCommand(
+    command: AgentPageCommand,
+  ): Promise<AgentPageCommandResult> {
+    if (command.type === "dispose") {
+      this.agentElements.clear();
+      this.agentLastUpdateTime = 0;
+      this.removeAutomationMask();
+      return null;
+    }
+
+    switch (command.type) {
+      case "get-browser-state": {
+        const content = this.updateAgentTree();
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const pageWidth = Math.max(
+          document.documentElement.scrollWidth,
+          document.body.scrollWidth,
+          viewportWidth,
+        );
+        const pageHeight = Math.max(
+          document.documentElement.scrollHeight,
+          document.body.scrollHeight,
+          viewportHeight,
+        );
+        const pixelsAbove = Math.max(0, window.scrollY);
+        const pixelsBelow = Math.max(
+          0,
+          pageHeight - pixelsAbove - viewportHeight,
+        );
+        const scrollRange = Math.max(0, pageHeight - viewportHeight);
+        const scrollPercent = scrollRange
+          ? Math.min(100, Math.round((pixelsAbove / scrollRange) * 100))
+          : 0;
+        const title = document.title.replace(/\s+/g, " ").trim();
+        const escapedTitle = title
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+        const state: AgentBrowserState = {
+          url: window.location.href,
+          title,
+          header: `Current Page: [${escapedTitle}](${window.location.href})\nPage info: ${viewportWidth}x${viewportHeight}px viewport, ${pageWidth}x${pageHeight}px total page size, ${pixelsAbove}px above, ${pixelsBelow}px below, at ${scrollPercent}% of page\n\nInteractive elements and visible text in the current viewport:\n\n${pixelsAbove > 4 ? `... ${pixelsAbove}px above - scroll to see more ...` : "[Start of page]"}`,
+          content,
+          footer:
+            pixelsBelow > 4
+              ? `... ${pixelsBelow}px below - scroll to see more ...`
+              : "[End of page]",
+        };
+        return state;
+      }
+      case "get-last-update-time":
+        return this.agentLastUpdateTime;
+      case "update-tree":
+        return this.updateAgentTree();
+      case "clean-up-highlights":
+        return null;
+      case "show-mask": {
+        this.ensureAutomationMask();
+        if (!this.automationMask) {
+          throw new Error("Automation mask is unavailable");
+        }
+        this.clearAutomationActionFeedback();
+        this.automationMask.style.display = "block";
+        return null;
+      }
+      case "hide-mask":
+        this.clearAutomationActionFeedback();
+        if (this.automationMask) this.automationMask.style.display = "none";
+        return null;
+      case "click-element": {
+        try {
+          const element = this.getAgentElement(command.index);
+          if (element.matches(":disabled, [aria-disabled='true']")) {
+            throw new Error("Element is disabled");
+          }
+          if (
+            element instanceof HTMLAnchorElement &&
+            element.target.toLowerCase() === "_blank"
+          ) {
+            throw new Error("Links that open another tab are not supported");
+          }
+          this.showAutomationTarget(element, true);
+          element.focus({ preventScroll: true });
+          element.click();
+          return {
+            success: true,
+            message: `Clicked element [${command.index}].`,
+          };
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to click element: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "input-text": {
+        try {
+          const element = this.getAgentElement(command.index);
+          if (element.matches(":disabled, [readonly]")) {
+            throw new Error("Element is not editable");
+          }
+          this.showAutomationTarget(element);
+          element.focus({ preventScroll: true });
+          if (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement
+          ) {
+            if (
+              element instanceof HTMLInputElement &&
+              [
+                "button",
+                "checkbox",
+                "color",
+                "file",
+                "hidden",
+                "image",
+                "radio",
+                "range",
+                "reset",
+                "submit",
+              ].includes(element.type)
+            ) {
+              throw new Error("Input type does not accept text");
+            }
+            this.setNativeValue(element, command.text);
+          } else if (
+            element.isContentEditable ||
+            element.matches('[contenteditable]:not([contenteditable="false"])')
+          ) {
+            element.textContent = command.text;
+            element.dispatchEvent(
+              new InputEvent("input", {
+                bubbles: true,
+                data: command.text,
+                inputType: "insertText",
+              }),
+            );
+            element.dispatchEvent(new Event("change", { bubbles: true }));
+          } else {
+            throw new Error(
+              "Element is not an input, textarea, or editable area",
+            );
+          }
+          return {
+            success: true,
+            message: `Entered text in element [${command.index}].`,
+          };
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to enter text: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "select-option": {
+        try {
+          const element = this.getAgentElement(command.index);
+          if (!(element instanceof HTMLSelectElement)) {
+            throw new Error("Element is not a native select");
+          }
+          if (element.disabled) throw new Error("Select is disabled");
+          this.showAutomationTarget(element);
+          const requestedText = command.text.replace(/\s+/g, " ").trim();
+          const option = Array.from(element.options).find(
+            (item) =>
+              item.textContent?.replace(/\s+/g, " ").trim() === requestedText,
+          );
+          if (!option) {
+            throw new Error(`Option "${requestedText}" was not found`);
+          }
+          if (option.disabled) throw new Error("Option is disabled");
+          const setter = Object.getOwnPropertyDescriptor(
+            HTMLSelectElement.prototype,
+            "value",
+          )?.set;
+          if (!setter) throw new Error("Select setter is unavailable");
+          setter.call(element, option.value);
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+          return {
+            success: true,
+            message: `Selected "${requestedText}" in element [${command.index}].`,
+          };
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to select option: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "modify-element": {
+        try {
+          const element = this.getAgentElement(command.index);
+          this.showAutomationTarget(element);
+          for (const change of command.changes) {
+            switch (change.type) {
+              case "set-style":
+                element.style.setProperty(change.name, change.value);
+                break;
+              case "remove-style":
+                element.style.removeProperty(change.name);
+                break;
+              case "set-attribute":
+                element.setAttribute(change.name, change.value);
+                break;
+              case "remove-attribute":
+                element.removeAttribute(change.name);
+                break;
+              case "set-text":
+                element.textContent = change.text;
+                break;
+            }
+          }
+          return {
+            success: true,
+            message: `Applied ${command.changes.length} DOM change(s) to element [${command.index}].`,
+          };
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to modify element: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "remove-element": {
+        try {
+          const element = this.getAgentElement(command.index);
+          if (
+            element === document.documentElement ||
+            element === document.body
+          ) {
+            throw new Error("The document root cannot be removed");
+          }
+          this.showAutomationTarget(element);
+          this.pageTaskElements.delete(element);
+          element.remove();
+          this.agentElements.delete(command.index);
+          return {
+            success: true,
+            message: `Removed element [${command.index}] from the page.`,
+          };
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to remove element: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "scroll": {
+        try {
+          const amount =
+            (command.options.pixels ??
+              command.options.numPages * window.innerHeight) *
+            (command.options.down ? 1 : -1);
+          if (command.options.index === undefined) {
+            this.clearAutomationActionFeedback();
+            window.scrollBy({ top: amount, behavior: "auto" });
+            return {
+              success: true,
+              message: `Scrolled the page vertically by ${amount}px.`,
+            };
+          }
+
+          let element: HTMLElement | null = this.getAgentElement(
+            command.options.index,
+          );
+          while (element) {
+            const style = window.getComputedStyle(element);
+            if (
+              /(auto|scroll|overlay)/.test(style.overflowY) &&
+              element.scrollHeight > element.clientHeight
+            ) {
+              this.showAutomationTarget(element);
+              const maximum = element.scrollHeight - element.clientHeight;
+              element.scrollTop = Math.max(
+                0,
+                Math.min(maximum, element.scrollTop + amount),
+              );
+              element.dispatchEvent(new Event("scroll"));
+              return {
+                success: true,
+                message: `Scrolled container [${command.options.index}] vertically by ${amount}px.`,
+              };
+            }
+            element = element.parentElement;
+          }
+          throw new Error("No vertically scrollable container was found");
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to scroll vertically: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      case "scroll-horizontally": {
+        try {
+          const amount =
+            command.options.pixels * (command.options.right ? 1 : -1);
+          if (command.options.index === undefined) {
+            this.clearAutomationActionFeedback();
+            window.scrollBy({ left: amount, behavior: "auto" });
+            return {
+              success: true,
+              message: `Scrolled the page horizontally by ${amount}px.`,
+            };
+          }
+
+          let element: HTMLElement | null = this.getAgentElement(
+            command.options.index,
+          );
+          while (element) {
+            const style = window.getComputedStyle(element);
+            if (
+              /(auto|scroll|overlay)/.test(style.overflowX) &&
+              element.scrollWidth > element.clientWidth
+            ) {
+              this.showAutomationTarget(element);
+              const maximum = element.scrollWidth - element.clientWidth;
+              element.scrollLeft = Math.max(
+                0,
+                Math.min(maximum, element.scrollLeft + amount),
+              );
+              element.dispatchEvent(new Event("scroll"));
+              return {
+                success: true,
+                message: `Scrolled container [${command.options.index}] horizontally by ${amount}px.`,
+              };
+            }
+            element = element.parentElement;
+          }
+          throw new Error("No horizontally scrollable container was found");
+        } catch (error) {
+          return {
+            success: false,
+            message: `Failed to scroll horizontally: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+    }
+  }
+
+  // Rebuilds the current viewport's text snapshot and stable element index map.
+  private updateAgentTree(): string {
+    this.agentElements.clear();
+    const interactiveIndexes = new Map<HTMLElement, number>();
+    const pageTaskAgentTargets = new Set<HTMLElement>();
+    for (const element of this.pageTaskElements) {
+      let target: Element | null = element;
+      while (target && !(target instanceof HTMLElement)) {
+        target = target.parentElement;
+      }
+      if (target) pageTaskAgentTargets.add(target);
+    }
+    const interactiveRoles = new Set([
+      "button",
+      "checkbox",
+      "combobox",
+      "link",
+      "menuitem",
+      "option",
+      "radio",
+      "searchbox",
+      "slider",
+      "spinbutton",
+      "switch",
+      "tab",
+      "textbox",
+    ]);
+
+    for (const candidate of document.body.querySelectorAll("*")) {
+      if (!(candidate instanceof HTMLElement)) continue;
+      if (
+        candidate.closest(
+          "[data-hyperpage-ui], [data-page-agent-not-interactive]",
+        ) ||
+        candidate.closest("[hidden], [inert], [aria-hidden='true']")
+      ) {
+        continue;
+      }
+      const style = window.getComputedStyle(candidate);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        style.opacity === "0"
+      ) {
+        continue;
+      }
+      const bounds = candidate.getBoundingClientRect();
+      if (
+        bounds.width <= 0 ||
+        bounds.height <= 0 ||
+        bounds.bottom <= 0 ||
+        bounds.right <= 0 ||
+        bounds.top >= window.innerHeight ||
+        bounds.left >= window.innerWidth
+      ) {
+        continue;
+      }
+
+      const role = candidate.getAttribute("role")?.trim().toLowerCase();
+      const nativeInteractive = candidate.matches(
+        'a[href], button, input:not([type="hidden"]), textarea, select, summary, [contenteditable]:not([contenteditable="false"])',
+      );
+      const scriptedInteractive =
+        candidate.hasAttribute("onclick") ||
+        candidate.onclick !== null ||
+        candidate.tabIndex >= 0 ||
+        Boolean(role && interactiveRoles.has(role));
+      const verticallyScrollable =
+        /(auto|scroll|overlay)/.test(style.overflowY) &&
+        candidate.scrollHeight > candidate.clientHeight;
+      const horizontallyScrollable =
+        /(auto|scroll|overlay)/.test(style.overflowX) &&
+        candidate.scrollWidth > candidate.clientWidth;
+      const userSelected = pageTaskAgentTargets.has(candidate);
+      if (
+        !nativeInteractive &&
+        !scriptedInteractive &&
+        !verticallyScrollable &&
+        !horizontallyScrollable &&
+        !userSelected
+      ) {
+        continue;
+      }
+
+      const index = this.agentElements.size;
+      this.agentElements.set(index, candidate);
+      interactiveIndexes.set(candidate, index);
+    }
+
+    const lines: string[] = [];
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (node) => {
+          if (node instanceof HTMLElement) {
+            if (
+              ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"].includes(
+                node.tagName,
+              ) ||
+              node.closest(
+                "[data-hyperpage-ui], [data-page-agent-not-interactive]",
+              ) ||
+              node.closest("[hidden], [inert], [aria-hidden='true']")
+            ) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            const style = window.getComputedStyle(node);
+            if (
+              style.display === "none" ||
+              style.visibility === "hidden" ||
+              style.visibility === "collapse" ||
+              style.opacity === "0"
+            ) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            return interactiveIndexes.has(node)
+              ? NodeFilter.FILTER_ACCEPT
+              : NodeFilter.FILTER_SKIP;
+          }
+
+          const parent = node.parentElement;
+          if (!parent || !node.textContent?.replace(/\s+/g, " ").trim()) {
+            return NodeFilter.FILTER_SKIP;
+          }
+          let ancestor: HTMLElement | null = parent;
+          while (ancestor) {
+            if (interactiveIndexes.has(ancestor)) {
+              return NodeFilter.FILTER_SKIP;
+            }
+            ancestor = ancestor.parentElement;
+          }
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const bounds = range.getBoundingClientRect();
+          return bounds.width > 0 &&
+            bounds.height > 0 &&
+            bounds.bottom > 0 &&
+            bounds.right > 0 &&
+            bounds.top < window.innerHeight &&
+            bounds.left < window.innerWidth
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_SKIP;
+        },
+      },
+    );
+
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent?.replace(/\s+/g, " ").trim();
+        if (text) {
+          lines.push(
+            text
+              .slice(0, 1_000)
+              .replaceAll("&", "&amp;")
+              .replaceAll("<", "&lt;")
+              .replaceAll(">", "&gt;"),
+          );
+        }
+        continue;
+      }
+
+      const element = node as HTMLElement;
+      const index = interactiveIndexes.get(element);
+      if (index === undefined) continue;
+      const attributes: Array<[string, string]> = [];
+      if (pageTaskAgentTargets.has(element)) {
+        attributes.push(["data-hyperpage-selected", "true"]);
+      }
+      for (const name of [
+        "title",
+        "type",
+        "name",
+        "role",
+        "placeholder",
+        "alt",
+        "aria-label",
+        "aria-expanded",
+        "aria-checked",
+        "aria-haspopup",
+        "target",
+        "contenteditable",
+      ]) {
+        const value = element.getAttribute(name)?.replace(/\s+/g, " ").trim();
+        if (value) attributes.push([name, value]);
+      }
+      if (element.matches(":disabled")) attributes.push(["disabled", "true"]);
+      if (element.matches("[readonly]")) attributes.push(["readonly", "true"]);
+      if (
+        element instanceof HTMLInputElement &&
+        ["checkbox", "radio"].includes(element.type)
+      ) {
+        attributes.push(["checked", String(element.checked)]);
+      }
+
+      let text = "";
+      if (element instanceof HTMLInputElement) {
+        if (element.type !== "password") text = element.value;
+      } else if (element instanceof HTMLTextAreaElement) {
+        text = element.value;
+      } else if (element instanceof HTMLSelectElement) {
+        text = Array.from(element.options)
+          .map((option) => option.textContent?.replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+          .join(" | ");
+        attributes.push(["value", element.value]);
+      } else {
+        text = element.innerText || element.textContent || "";
+      }
+      text = text.replace(/\s+/g, " ").trim().slice(0, 500);
+
+      const style = window.getComputedStyle(element);
+      const scrollParts: string[] = [];
+      if (
+        /(auto|scroll|overlay)/.test(style.overflowY) &&
+        element.scrollHeight > element.clientHeight
+      ) {
+        scrollParts.push(
+          `top=${Math.round(element.scrollTop)}`,
+          `bottom=${Math.round(element.scrollHeight - element.clientHeight - element.scrollTop)}`,
+        );
+      }
+      if (
+        /(auto|scroll|overlay)/.test(style.overflowX) &&
+        element.scrollWidth > element.clientWidth
+      ) {
+        scrollParts.push(
+          `left=${Math.round(element.scrollLeft)}`,
+          `right=${Math.round(element.scrollWidth - element.clientWidth - element.scrollLeft)}`,
+        );
+      }
+      if (scrollParts.length) {
+        attributes.push(["data-scrollable", scrollParts.join(", ")]);
+      }
+
+      let depth = 0;
+      let ancestor = element.parentElement;
+      while (ancestor) {
+        if (interactiveIndexes.has(ancestor)) depth += 1;
+        ancestor = ancestor.parentElement;
+      }
+      const serializedAttributes = attributes
+        .map(
+          ([name, value]) =>
+            `${name}="${value
+              .slice(0, 160)
+              .replaceAll("&", "&amp;")
+              .replaceAll('"', "&quot;")
+              .replaceAll("<", "&lt;")
+              .replaceAll(">", "&gt;")}"`,
+        )
+        .join(" ");
+      const openingTag = `<${element.tagName.toLowerCase()}${serializedAttributes ? ` ${serializedAttributes}` : ""}`;
+      const escapedText = text
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+      lines.push(
+        `${"\t".repeat(depth)}[${index}]${openingTag}${escapedText ? `>${escapedText}</${element.tagName.toLowerCase()}>` : " />"}`,
+      );
+    }
+
+    this.agentLastUpdateTime = Date.now();
+    return lines.length ? lines.join("\n") : "<EMPTY>";
+  }
+
+  // Resolves an element only from the most recent page snapshot.
+  private getAgentElement(index: number): HTMLElement {
+    if (!this.agentLastUpdateTime) {
+      throw new Error("The page has not been indexed yet");
+    }
+    const element = this.agentElements.get(index);
+    if (!element || !element.isConnected) {
+      throw new Error(
+        `No current interactive element exists at index ${index}`,
+      );
+    }
+    return element;
+  }
+
+  // Routes the complete page command union to its exact controller operation.
+  execute(command: PageCommand): PageCommandResult {
     switch (command.type) {
       case "start-selection":
-        this.startSelection();
+        this.startSelection(false);
+        break;
+      case "start-page-task-selection":
+        this.startSelection(true);
+        break;
+      case "add-selection-to-page-task":
+        if (!this.selectedElement) throw new Error("selectionRequired");
+        this.pageTaskElements.add(this.selectedElement);
         break;
       case "select-parent":
         this.selectParent();
@@ -652,12 +1496,6 @@ export class PageController {
         this.cancelSelection();
         break;
       case "get-page-state":
-        break;
-      case "hide-selection":
-        this.hideSelection();
-        break;
-      case "undo-hide":
-        this.undoHide();
         break;
       case "replace-editable":
         this.replaceEditable(command.text);
@@ -685,6 +1523,10 @@ export class PageController {
   // Releases every observer, event listener, and DOM node owned by this controller.
   destroy(): void {
     this.stopSelection();
+    this.agentElements.clear();
+    this.pageTaskElements.clear();
+    this.agentLastUpdateTime = 0;
+    this.removeAutomationMask();
     this.resizeObserver.disconnect();
     this.mutationObserver.disconnect();
     window.removeEventListener("scroll", this.handleViewportChange, true);
@@ -709,9 +1551,10 @@ export class PageController {
   }
 
   // Starts inspector mode and intercepts only the click used to confirm selection.
-  private startSelection(): void {
+  private startSelection(forPageTask: boolean): void {
     if (this.selecting) return;
     this.selecting = true;
+    this.selectingPageTaskElement = forPageTask;
     this.textActionTarget = null;
     this.hoveredImage = null;
     this.hideTextControls();
@@ -754,6 +1597,7 @@ export class PageController {
   // Cancels inspector mode and clears the confirmed selection outline.
   private cancelSelection(): void {
     this.stopSelection();
+    this.selectingPageTaskElement = false;
     this.resizeObserver.disconnect();
     if (this.selectedElement) this.selectionRevision += 1;
     this.selectedElement = null;
@@ -818,9 +1662,12 @@ export class PageController {
 
   // Stores a confirmed element and begins tracking its live bounds.
   private confirmSelection(element: Element): void {
+    const pageTaskElement = this.selectingPageTaskElement;
     this.stopSelection();
+    this.selectingPageTaskElement = false;
     this.resizeObserver.disconnect();
     this.selectedElement = element;
+    if (pageTaskElement) this.pageTaskElements.add(element);
     this.selectionRevision += 1;
     this.resizeObserver.observe(element);
     this.drawOutline(this.selectedOutline, element);
@@ -1134,7 +1981,12 @@ export class PageController {
       if (!response.ok) throw new Error(response.error);
       output = response.data;
     } catch (error) {
-      output = formatError(this.locale, error);
+      this.showFloatingResult(
+        formatError(this.locale, error),
+        target.selection.rect,
+        "error",
+      );
+      return;
     } finally {
       this.inlineRequestPending = false;
       delete this.overlayHost.dataset.pending;
@@ -1164,7 +2016,19 @@ export class PageController {
   }
 
   // Displays one non-layout-changing result window beside the source region.
-  private showFloatingResult(text: string, anchorRect: ViewportRect): void {
+  private showFloatingResult(
+    text: string,
+    anchorRect: ViewportRect,
+    variant: "result" | "error" = "result",
+  ): void {
+    const title = t(this.locale, variant === "error" ? "taskFailed" : "result");
+    this.floatingResult.dataset.variant = variant;
+    this.floatingResult.setAttribute(
+      "role",
+      variant === "error" ? "alert" : "dialog",
+    );
+    this.floatingResultTitle.textContent = title;
+    this.floatingResult.setAttribute("aria-label", title);
     this.floatingResultContent.textContent = text;
     const width = Math.min(360, window.innerWidth - 16);
     this.floatingResult.style.width = `${width}px`;
@@ -1207,45 +2071,6 @@ export class PageController {
     outline.style.transform = `translate(${rect.x}px, ${rect.y}px)`;
     outline.style.width = `${rect.width}px`;
     outline.style.height = `${rect.height}px`;
-  }
-
-  // Temporarily hides the selected HTML element and records its exact inline style.
-  private hideSelection(): void {
-    if (!(this.selectedElement instanceof HTMLElement)) {
-      throw new Error("htmlElementRequired");
-    }
-    if (
-      this.selectedElement === document.documentElement ||
-      this.selectedElement === document.body
-    ) {
-      throw new Error("rootElementModificationBlocked");
-    }
-    this.hiddenChanges.push({
-      element: this.selectedElement,
-      displayValue: this.selectedElement.style.getPropertyValue("display"),
-      displayPriority:
-        this.selectedElement.style.getPropertyPriority("display"),
-    });
-    this.selectedElement.style.setProperty("display", "none", "important");
-    this.selectedOutline.style.display = "none";
-    this.emitState();
-  }
-
-  // Restores the most recently hidden element's original inline display declaration.
-  private undoHide(): void {
-    const change = this.hiddenChanges.pop();
-    if (!change) throw new Error("nothingToUndo");
-    if (change.displayValue) {
-      change.element.style.setProperty(
-        "display",
-        change.displayValue,
-        change.displayPriority,
-      );
-    } else {
-      change.element.style.removeProperty("display");
-    }
-    this.scheduleOutlineUpdate();
-    this.emitState();
   }
 
   // Replaces a selected editable value and dispatches the browser events sites expect.
@@ -1494,7 +2319,6 @@ export class PageController {
     return {
       selection,
       selectionRevision: this.selectionRevision,
-      canUndoHide: this.hiddenChanges.length > 0,
       canUndoReplace: this.editableChanges.length > 0,
       canRemoveInsertion: this.insertedResults.length > 0,
       selecting: this.selecting,

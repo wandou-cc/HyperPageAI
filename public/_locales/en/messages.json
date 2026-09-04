@@ -3,6 +3,9 @@
     "message": "HyperPage AI"
   },
   "extensionDescription": {
-    "message": "Select page text, images, or elements to translate, explain, extract, and process with AI."
+    "message": "Process selected content with AI or describe a task to operate webpages."
+  },
+  "contextMenuEnable": {
+    "message": "Enable HyperPage on webpages"
   }
 }

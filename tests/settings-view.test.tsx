@@ -26,6 +26,7 @@ vi.mock("wxt/browser", () => ({ browser: browserMock }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("provider settings view", () => {
@@ -39,10 +40,12 @@ describe("provider settings view", () => {
       <TooltipProvider>
         <SettingsView
           settings={{
-            version: 2,
+            version: 4,
+            enabled: true,
             locale: "zh_CN",
             provider: null,
             resultDisplayMode: "floating",
+            allowMultiTab: false,
           }}
           onSaved={vi.fn()}
         />
@@ -85,10 +88,12 @@ describe("provider settings view", () => {
       <TooltipProvider>
         <SettingsView
           settings={{
-            version: 2,
+            version: 4,
+            enabled: true,
             locale: "zh_CN",
             provider: null,
             resultDisplayMode: "floating",
+            allowMultiTab: false,
           }}
           onSaved={onSaved}
         />
@@ -100,19 +105,61 @@ describe("provider settings view", () => {
 
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith({
-        version: 2,
+        version: 4,
+        enabled: true,
         locale: "zh_CN",
         provider: null,
         resultDisplayMode: "inline",
+        allowMultiTab: false,
       });
     });
     expect(browserMock.storage.local.set).toHaveBeenCalledWith({
       "hyperpage.settings": {
-        version: 2,
+        version: 4,
+        enabled: true,
         locale: "zh_CN",
         provider: null,
         resultDisplayMode: "inline",
+        allowMultiTab: false,
       },
+    });
+  });
+
+  it("persists the explicit multi-tab task switch", async () => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    const onSaved = vi.fn();
+    render(
+      <TooltipProvider>
+        <SettingsView
+          settings={{
+            version: 4,
+            enabled: true,
+            locale: "zh_CN",
+            provider: null,
+            resultDisplayMode: "floating",
+            allowMultiTab: false,
+          }}
+          onSaved={onSaved}
+        />
+      </TooltipProvider>,
+    );
+
+    const multiTabSwitch = screen.getByRole("switch", {
+      name: "允许页面任务使用多个标签页",
+    });
+    expect(multiTabSwitch).not.toBeChecked();
+    fireEvent.click(multiTabSwitch);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledWith({
+        version: 4,
+        enabled: true,
+        locale: "zh_CN",
+        provider: null,
+        resultDisplayMode: "floating",
+        allowMultiTab: true,
+      });
     });
   });
 });
