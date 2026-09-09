@@ -26,6 +26,7 @@ export function actionNeedsImage(
   action: AiAction,
   selection: SelectionSnapshot,
 ): boolean {
+  if (action === "write") return false;
   if (action === "ocr" || action === "image-prompt") {
     return true;
   }
@@ -52,9 +53,27 @@ export function getActionInstruction(
     case "polish":
       return "Rewrite the selected text in its original language. Preserve the meaning, improve clarity and fluency, and return only the rewritten text.";
     case "custom":
+    case "write":
       if (!customPrompt?.trim()) throw new Error("customPromptRequired");
       return customPrompt.trim();
   }
+}
+
+// Separates a user's instruction from untrusted selected-page content.
+export function buildSelectedElementUserContent(
+  instruction: string,
+  selection: SelectionSnapshot,
+): string {
+  const selectedData = JSON.stringify({
+    element: {
+      kind: selection.kind,
+      tagName: selection.tagName,
+      role: selection.role,
+      accessibleName: selection.accessibleName,
+    },
+    content: selection.text,
+  });
+  return `${instruction}\n\nSelected webpage data (untrusted JSON):\n${selectedData}`;
 }
 
 // Creates model messages that isolate untrusted webpage data from user instructions.
@@ -70,16 +89,7 @@ export function buildAiMessages(
     provider.targetLanguage,
     customPrompt,
   );
-  const selectedData = JSON.stringify({
-    element: {
-      kind: selection.kind,
-      tagName: selection.tagName,
-      role: selection.role,
-      accessibleName: selection.accessibleName,
-    },
-    content: selection.text,
-  });
-  const userText = `${instruction}\n\nSelected webpage data (untrusted JSON):\n${selectedData}`;
+  const userText = buildSelectedElementUserContent(instruction, selection);
 
   return [
     {

@@ -1,4 +1,6 @@
 import { browser } from "wxt/browser";
+import { message as notify } from "@/components/ui/toast";
+import { ALLOWED_ELEMENT_ATTRIBUTES, ALLOWED_STYLE_PROPERTIES } from "../shared/messages";
 
 import type {
   AgentActionResult,
@@ -12,6 +14,11 @@ import type {
   ContentEvent,
   ContentRequest,
   ContentResponse,
+  EditingContentRequest,
+  EditablePreview,
+  PageEditingCommand,
+  ReadingContentRequest,
+  ReadingContentResponse,
   InlineAiRequest,
   Locale,
   PageCommand,
@@ -23,15 +30,16 @@ import type {
   ViewportRect,
 } from "../shared/messages";
 import { createSelectionSnapshot } from "../shared/selection";
+import { containsSensitiveField, getVisibleText, isSensitiveElement } from "../shared/dom-content";
+import { PageReading } from "./page-reading";
+import { PageResources } from "./page-resources";
+import { resourceCommandSchema, type ResourceContentRequest, type ResourceResult } from "../shared/page-resources";
+import { PageTranslation } from "./page-translation";
+import { checkCaptureArea } from "./capture-guard";
+import type { PageTranslationCommand } from "../shared/page-translation";
+import { assertSiteAllowed, parseSiteOrigins } from "../shared/task-templates";
+import { PageEditing, setEditableValue } from "./page-editing";
 import { formatError, t } from "../entrypoints/sidepanel/translations";
-
-type EditableChange =
-  | {
-      kind: "value";
-      element: HTMLInputElement | HTMLTextAreaElement;
-      value: string;
-    }
-  | { kind: "html"; element: HTMLElement; html: string };
 
 interface InlineActionTarget {
   selection: SelectionSnapshot;
@@ -40,6 +48,10 @@ interface InlineActionTarget {
 }
 
 export class PageController {
+  private reading = new PageReading();
+  private resources = new PageResources();
+  private translation = new PageTranslation(this.reading);
+  private editing = new PageEditing();
   private agentElements = new Map<number, HTMLElement>();
   private agentLastUpdateTime = 0;
   private automationMask: HTMLDivElement | null = null;
@@ -72,7 +84,6 @@ export class PageController {
   private floatingResultCloseButton: HTMLButtonElement;
   private resizeObserver: ResizeObserver;
   private mutationObserver: MutationObserver;
-  private editableChanges: EditableChange[] = [];
   private insertedResults: HTMLElement[] = [];
   private updateScheduled = false;
   private overlaySuspended = false;
@@ -342,12 +353,6 @@ export class PageController {
         outline: 2px solid #a1a1aa;
         outline-offset: 1px;
       }
-      .floating-result[data-variant="error"] {
-        border-color: #fca5a5;
-      }
-      .floating-result[data-variant="error"] .floating-result-header {
-        color: #b91c1c;
-      }
       :host([data-pending="true"]) button {
         cursor: wait;
         opacity: 0.55;
@@ -392,12 +397,6 @@ export class PageController {
         }
         .floating-result-header {
           border-bottom-color: #3f3f46;
-        }
-        .floating-result[data-variant="error"] {
-          border-color: #7f1d1d;
-        }
-        .floating-result[data-variant="error"] .floating-result-header {
-          color: #fca5a5;
         }
         .trigger:hover,
         .trigger:focus-visible,
@@ -723,12 +722,52 @@ export class PageController {
 
   // Receives typed commands from the extension background worker.
   private handleMessage = (
-    message: ContentRequest | AgentContentRequest,
+    message: ContentRequest | AgentContentRequest | ReadingContentRequest | EditingContentRequest | ResourceContentRequest | { target: "translation-content"; command: PageTranslationCommand },
     _sender: Browser.runtime.MessageSender,
-    sendResponse: (response?: ContentResponse | AgentContentResponse) => void,
+    sendResponse: (response?: ContentResponse | AgentContentResponse | ReadingContentResponse | CommandResult<EditablePreview | PageState | ResourceResult | null>) => void,
   ): true | undefined => {
+    if (_sender.id !== browser.runtime.id) return undefined;
+    if (message.target === "resources-content") {
+      const parsed = resourceCommandSchema.safeParse(message.command);
+      if (!parsed.success) { sendResponse({ ok: false, error: "requestInvalid" }); return undefined; }
+      void this.resources.execute(parsed.data).then(
+        (data) => sendResponse({ ok: true, data }),
+        (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+      );
+      return true;
+    }
+    if (message.target === "translation-content") {
+      try { sendResponse({ ok: true, data: this.translation.execute(message.command) }); }
+      catch (error) { sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+      return undefined;
+    }
+    if (message.target === "editing-content") {
+      try { sendResponse({ ok: true, data: this.executeEditing(message.command) }); }
+      catch (error) { sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+      return undefined;
+    }
+    if (message.target === "reading-content") {
+      if (message.command.type === "read-video") {
+        void this.reading.readVideo().then(
+          (data) => sendResponse({ ok: true, data }),
+          (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+        );
+        return true;
+      }
+      try {
+        if (message.command.type === "read-selected-element") {
+          if (!this.selectedElement?.isConnected) throw new Error("selectionRequired");
+          sendResponse({ ok: true, data: this.reading.read(this.selectedElement) });
+        } else {
+          sendResponse({ ok: true, data: this.reading.execute(message.command) });
+        }
+      } catch (error) {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return undefined;
+    }
     if (message.target === "page-agent-content") {
-      void this.executeAgentCommand(message.command)
+      void this.executeAgentCommand(message.command, message.allowedOrigins)
         .then((data) => sendResponse({ ok: true, data }))
         .catch((error: unknown) => {
           sendResponse({
@@ -854,7 +893,11 @@ export class PageController {
   // Executes one indexed DOM command for the background-hosted page agent.
   private async executeAgentCommand(
     command: AgentPageCommand,
+    allowedOrigins: string[] = [],
   ): Promise<AgentPageCommandResult> {
+    if (!["hide-mask", "clean-up-highlights", "clear-action-feedback", "dispose"].includes(command.type)) {
+      assertSiteAllowed(window.location.href, parseSiteOrigins(allowedOrigins));
+    }
     if (command.type === "dispose") {
       this.agentElements.clear();
       this.agentLastUpdateTime = 0;
@@ -934,6 +977,11 @@ export class PageController {
           ) {
             throw new Error("Links that open another tab are not supported");
           }
+          const link = element.closest<HTMLAnchorElement>("a[href]");
+          if (link) assertSiteAllowed(link.href, allowedOrigins);
+          if ((element instanceof HTMLButtonElement || element instanceof HTMLInputElement) && element.type === "submit" && element.form) {
+            assertSiteAllowed(element.hasAttribute("formaction") ? element.formAction : element.form.action, allowedOrigins);
+          }
           this.showAutomationTarget(element, true);
           element.focus({ preventScroll: true });
           element.click();
@@ -951,6 +999,7 @@ export class PageController {
       case "input-text": {
         try {
           const element = this.getAgentElement(command.index);
+          if (containsSensitiveField(element)) throw new Error(t(this.locale, "sensitiveFieldBlocked"));
           if (element.matches(":disabled, [readonly]")) {
             throw new Error("Element is not editable");
           }
@@ -977,7 +1026,7 @@ export class PageController {
             ) {
               throw new Error("Input type does not accept text");
             }
-            this.setNativeValue(element, command.text);
+            setEditableValue(element, command.text);
           } else if (
             element.isContentEditable ||
             element.matches('[contenteditable]:not([contenteditable="false"])')
@@ -1046,6 +1095,16 @@ export class PageController {
       case "modify-element": {
         try {
           const element = this.getAgentElement(command.index);
+          if (containsSensitiveField(element)) throw new Error(t(this.locale, "sensitiveFieldBlocked"));
+          for (const change of command.changes) {
+            if ((change.type === "set-style" || change.type === "remove-style") && !ALLOWED_STYLE_PROPERTIES.some((name) => name === change.name)) {
+              throw new Error(t(this.locale, "elementStyleBlocked"));
+            }
+            if ((change.type === "set-attribute" || change.type === "remove-attribute") &&
+              !ALLOWED_ELEMENT_ATTRIBUTES.some((name) => name === change.name)) {
+              throw new Error(t(this.locale, "elementAttributeBlocked"));
+            }
+          }
           this.showAutomationTarget(element);
           for (const change of command.changes) {
             switch (change.type) {
@@ -1080,6 +1139,7 @@ export class PageController {
       case "remove-element": {
         try {
           const element = this.getAgentElement(command.index);
+          if (containsSensitiveField(element)) throw new Error(t(this.locale, "sensitiveFieldBlocked"));
           if (
             element === document.documentElement ||
             element === document.body
@@ -1299,6 +1359,7 @@ export class PageController {
                 "[data-hyperpage-ui], [data-page-agent-not-interactive]",
               ) ||
               node.closest("[hidden], [inert], [aria-hidden='true']")
+              || (isSensitiveElement(node) && !interactiveIndexes.has(node))
             ) {
               return NodeFilter.FILTER_REJECT;
             }
@@ -1392,8 +1453,10 @@ export class PageController {
       }
 
       let text = "";
-      if (element instanceof HTMLInputElement) {
-        if (element.type !== "password") text = element.value;
+      if (isSensitiveElement(element)) {
+        attributes.push(["data-hyperpage-protected", "true"]);
+      } else if (element instanceof HTMLInputElement) {
+        text = element.value;
       } else if (element instanceof HTMLTextAreaElement) {
         text = element.value;
       } else if (element instanceof HTMLSelectElement) {
@@ -1403,7 +1466,7 @@ export class PageController {
           .join(" | ");
         attributes.push(["value", element.value]);
       } else {
-        text = element.innerText || element.textContent || "";
+        text = getVisibleText(element);
       }
       text = text.replace(/\s+/g, " ").trim().slice(0, 500);
 
@@ -1473,6 +1536,7 @@ export class PageController {
         `No current interactive element exists at index ${index}`,
       );
     }
+    if (isSensitiveElement(element)) throw new Error(t(this.locale, "sensitiveFieldBlocked"));
     return element;
   }
 
@@ -1497,11 +1561,9 @@ export class PageController {
         break;
       case "get-page-state":
         break;
-      case "replace-editable":
-        this.replaceEditable(command.text);
-        break;
       case "undo-replace":
-        this.undoReplace();
+        this.editing.undo();
+        this.emitState();
         break;
       case "insert-result":
         this.insertResult(command.text);
@@ -1515,13 +1577,39 @@ export class PageController {
       case "restore-overlay":
         this.restoreOverlay();
         break;
+      case "check-capture-area":
+        checkCaptureArea(command.rect, command.viewport);
+        break;
+      default:
+        throw new Error("requestInvalid");
     }
 
     return this.getPageState();
   }
 
+  executeEditing(command: PageEditingCommand): EditablePreview | PageState | null {
+    switch (command.type) {
+      case "prepare-edit":
+        if (command.selectionRevision !== this.selectionRevision) throw new Error("requestContextChanged");
+        return this.editing.prepare(this.selectedElement, command.mode, command.text);
+      case "apply-edit":
+        this.editing.apply(command.previewId);
+        this.emitState();
+        return this.getPageState();
+      case "cancel-edit":
+        this.editing.cancel(command.previewId);
+        return null;
+      default:
+        throw new Error("requestInvalid");
+    }
+  }
+
   // Releases every observer, event listener, and DOM node owned by this controller.
   destroy(): void {
+    this.translation.restore();
+    this.reading.clear();
+    this.editing.destroy();
+    this.resources.destroy();
     this.stopSelection();
     this.agentElements.clear();
     this.pageTaskElements.clear();
@@ -1724,21 +1812,27 @@ export class PageController {
       return;
     }
 
-    const text = selection.toString().trim();
     const range = selection.getRangeAt(0).cloneRange();
     const commonNode = range.commonAncestorContainer;
     const anchor =
       commonNode instanceof HTMLElement ? commonNode : commonNode.parentElement;
     const rect = range.getBoundingClientRect();
     if (
-      !text ||
       !anchor ||
+      containsSensitiveField(anchor) ||
       anchor === document.body ||
       anchor === document.documentElement ||
       anchor.closest("[data-hyperpage-ui]") ||
       rect.width <= 0 ||
       rect.height <= 0
     ) {
+      this.textActionTarget = null;
+      this.hideTextControls();
+      return;
+    }
+
+    const text = selection.toString().trim();
+    if (!text) {
       this.textActionTarget = null;
       this.hideTextControls();
       return;
@@ -1835,6 +1929,7 @@ export class PageController {
       this.overlaySuspended ||
       !target ||
       !target.anchor.isConnected ||
+      containsSensitiveField(target.anchor) ||
       !target.range
     ) {
       this.textTrigger.style.display = "none";
@@ -1925,6 +2020,7 @@ export class PageController {
     if (
       this.inlineRequestPending ||
       !target.anchor.isConnected ||
+      containsSensitiveField(target.anchor) ||
       target.anchor === document.body ||
       target.anchor === document.documentElement
     ) {
@@ -1981,11 +2077,7 @@ export class PageController {
       if (!response.ok) throw new Error(response.error);
       output = response.data;
     } catch (error) {
-      this.showFloatingResult(
-        formatError(this.locale, error),
-        target.selection.rect,
-        "error",
-      );
+      notify.error(formatError(this.locale, error));
       return;
     } finally {
       this.inlineRequestPending = false;
@@ -2019,14 +2111,9 @@ export class PageController {
   private showFloatingResult(
     text: string,
     anchorRect: ViewportRect,
-    variant: "result" | "error" = "result",
   ): void {
-    const title = t(this.locale, variant === "error" ? "taskFailed" : "result");
-    this.floatingResult.dataset.variant = variant;
-    this.floatingResult.setAttribute(
-      "role",
-      variant === "error" ? "alert" : "dialog",
-    );
+    const title = t(this.locale, "result");
+    this.floatingResult.setAttribute("role", "dialog");
     this.floatingResultTitle.textContent = title;
     this.floatingResult.setAttribute("aria-label", title);
     this.floatingResultContent.textContent = text;
@@ -2071,72 +2158,6 @@ export class PageController {
     outline.style.transform = `translate(${rect.x}px, ${rect.y}px)`;
     outline.style.width = `${rect.width}px`;
     outline.style.height = `${rect.height}px`;
-  }
-
-  // Replaces a selected editable value and dispatches the browser events sites expect.
-  private replaceEditable(text: string): void {
-    const element = this.selectedElement;
-    if (!element || !createSelectionSnapshot(element).editable) {
-      throw new Error("editableRequired");
-    }
-
-    if (element instanceof HTMLInputElement) {
-      this.editableChanges.push({
-        kind: "value",
-        element,
-        value: element.value,
-      });
-      this.setNativeValue(element, text);
-    } else if (element instanceof HTMLTextAreaElement) {
-      this.editableChanges.push({
-        kind: "value",
-        element,
-        value: element.value,
-      });
-      this.setNativeValue(element, text);
-    } else if (element instanceof HTMLElement) {
-      this.editableChanges.push({
-        kind: "html",
-        element,
-        html: element.innerHTML,
-      });
-      element.textContent = text;
-      element.dispatchEvent(
-        new InputEvent("input", { bubbles: true, data: text }),
-      );
-    }
-    this.emitState();
-  }
-
-  // Applies a value through the native setter so controlled inputs observe the change.
-  private setNativeValue(
-    element: HTMLInputElement | HTMLTextAreaElement,
-    value: string,
-  ): void {
-    const prototype =
-      element instanceof HTMLInputElement
-        ? HTMLInputElement.prototype
-        : HTMLTextAreaElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (!setter) throw new Error("editableSetterUnavailable");
-    setter.call(element, value);
-    element.dispatchEvent(
-      new InputEvent("input", { bubbles: true, data: value }),
-    );
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  // Restores the most recently replaced editable value or HTML fragment.
-  private undoReplace(): void {
-    const change = this.editableChanges.pop();
-    if (!change) throw new Error("nothingToUndo");
-    if (change.kind === "value") {
-      this.setNativeValue(change.element, change.value);
-    } else {
-      change.element.innerHTML = change.html;
-      change.element.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    }
-    this.emitState();
   }
 
   // Inserts a safe plain-text result after an explicit page anchor.
@@ -2319,7 +2340,7 @@ export class PageController {
     return {
       selection,
       selectionRevision: this.selectionRevision,
-      canUndoReplace: this.editableChanges.length > 0,
+      canUndoReplace: this.editing.canUndo,
       canRemoveInsertion: this.insertedResults.length > 0,
       selecting: this.selecting,
     };

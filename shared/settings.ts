@@ -1,11 +1,14 @@
 import { browser } from "wxt/browser";
+import { z } from "zod";
+import { getTemplateVariables, parseSiteOrigins } from "./task-templates";
 
 import type {
-  Locale,
+  ModelCapabilities,
+  ModelCapability,
+  ModelTask,
   PageAgentExecutionRecord,
   ProviderConfig,
   ProviderCredentials,
-  ResultDisplayMode,
   SavedPageWorkflow,
   StoredPageAgentHistory,
   StoredPageWorkflows,
@@ -13,27 +16,146 @@ import type {
 } from "./messages";
 
 export const SETTINGS_STORAGE_KEY = "hyperpage.settings";
-export const SETTINGS_VERSION = 4;
+export const SETTINGS_VERSION = 8;
 export const PAGE_WORKFLOWS_STORAGE_KEY = "hyperpage.pageWorkflows";
-export const PAGE_WORKFLOWS_VERSION = 1;
+export const PAGE_WORKFLOWS_VERSION = 2;
 export const PAGE_AGENT_HISTORY_STORAGE_KEY = "hyperpage.pageAgentHistory";
 export const PAGE_AGENT_HISTORY_VERSION = 1;
 export const PAGE_AGENT_HISTORY_LIMIT = 20;
 
-interface LegacySettingsV1 {
-  locale: Locale;
-  provider: ProviderConfig | null;
-}
+z.config({ jitless: true });
 
-interface LegacySettingsV2 extends LegacySettingsV1 {
-  version: 2;
-  resultDisplayMode: ResultDisplayMode;
-}
+export const MODEL_TASKS = ["chat", "text", "vision", "automation"] as const;
+const capabilitySchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unknown") }).strict(),
+  z
+    .object({
+      status: z.literal("supported"),
+      checkedAt: z.number().int().nonnegative().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed"),
+      checkedAt: z.number().int().nonnegative(),
+      error: z.string().min(1),
+    })
+    .strict(),
+]);
+const capabilitiesSchema = z
+  .object({
+    text: capabilitySchema,
+    streaming: capabilitySchema,
+    vision: capabilitySchema,
+    tools: capabilitySchema,
+    webSearch: capabilitySchema,
+  })
+  .strict();
+export const PROVIDER_PROTOCOLS = ["chat-completions", "responses", "anthropic", "gemini"] as const;
+const legacyCredentialsSchema = z.object({ baseUrl: z.string(), apiKey: z.string() });
+const credentialsSchema = legacyCredentialsSchema.extend({ protocol: z.enum(PROVIDER_PROTOCOLS) });
+const providerSchema = credentialsSchema
+  .extend({
+    model: z.string(),
+    targetLanguage: z.string(),
+    capabilities: capabilitiesSchema,
+  })
+  .strict();
+const legacyProviderSchema = legacyCredentialsSchema
+  .extend({
+    model: z.string(),
+    targetLanguage: z.string(),
+    supportsVision: z.boolean(),
+  })
+  .strict()
+  .nullable();
+const legacyBaseSchema = z.object({
+  locale: z.enum(["zh_CN", "en"]),
+  provider: legacyProviderSchema,
+});
+const displaySchema = z.enum(["floating", "inline"]);
+const legacyV2Schema = legacyBaseSchema.extend({
+  version: z.literal(2),
+  resultDisplayMode: displaySchema,
+});
+const legacyV3Schema = legacyV2Schema.extend({
+  version: z.literal(3),
+  enabled: z.boolean(),
+});
+const legacyV4Schema = legacyV3Schema.extend({
+  version: z.literal(4),
+  allowMultiTab: z.boolean(),
+});
+const legacySettingsSchema = z.union([
+  legacyBaseSchema.strict(),
+  legacyV2Schema.strict(),
+  legacyV3Schema.strict(),
+  legacyV4Schema.strict(),
+]);
+const settingsObjectSchema = z
+  .object({
+    version: z.literal(SETTINGS_VERSION),
+    enabled: z.boolean(),
+    locale: z.enum(["zh_CN", "en"]),
+    resultDisplayMode: displaySchema,
+    allowMultiTab: z.boolean(),
+    providers: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          name: z.string().trim().min(1).max(100),
+          config: providerSchema,
+        })
+        .strict(),
+    ),
+    taskModels: z
+      .object({
+        chat: z.string().nullable(),
+        text: z.string().nullable(),
+        vision: z.string().nullable(),
+        automation: z.string().nullable(),
+      })
+      .strict(),
+  })
+  .strict();
+const legacyV7Schema = settingsObjectSchema.extend({
+  version: z.literal(7),
+  chunkedReading: z.boolean(),
+});
+const legacyV6Schema = legacyV7Schema.extend({
+  version: z.literal(6),
+  providers: z.array(z.object({
+    id: z.string().trim().min(1),
+    name: z.string().trim().min(1).max(100),
+    config: providerSchema.omit({ protocol: true }),
+  }).strict()),
+}).strict();
+const legacyV5Schema = legacyV6Schema.omit({ chunkedReading: true }).extend({
+  version: z.literal(5),
+  providers: z.array(z.object({
+    id: z.string().trim().min(1),
+    name: z.string().trim().min(1).max(100),
+    config: providerSchema.omit({ protocol: true }).extend({ capabilities: capabilitiesSchema.omit({ webSearch: true }) }),
+  }).strict()),
+}).strict();
+const settingsSchema = settingsObjectSchema.refine((settings) => {
+    const ids = new Set(settings.providers.map((profile) => profile.id));
+    return (
+      ids.size === settings.providers.length &&
+      Object.values(settings.taskModels).every(
+        (id) => id === null || ids.has(id),
+      )
+    );
+  });
 
-interface LegacySettingsV3 extends LegacySettingsV1 {
-  version: 3;
-  enabled: boolean;
-  resultDisplayMode: ResultDisplayMode;
+export function createUnknownCapabilities(): ModelCapabilities {
+  return {
+    text: { status: "unknown" },
+    streaming: { status: "unknown" },
+    vision: { status: "unknown" },
+    tools: { status: "unknown" },
+    webSearch: { status: "unknown" },
+  };
 }
 
 // Creates the first-run settings from Chrome's current interface language.
@@ -42,7 +164,8 @@ export function createDefaultSettings(uiLanguage: string): StoredSettings {
     version: SETTINGS_VERSION,
     enabled: true,
     locale: uiLanguage.toLowerCase().startsWith("zh") ? "zh_CN" : "en",
-    provider: null,
+    providers: [],
+    taskModels: { chat: null, text: null, vision: null, automation: null },
     resultDisplayMode: "floating",
     allowMultiTab: false,
   };
@@ -50,76 +173,81 @@ export function createDefaultSettings(uiLanguage: string): StoredSettings {
 
 // Converts earlier settings shapes into the current persisted schema.
 export function parseStoredSettings(value: unknown): StoredSettings {
-  if (!value || typeof value !== "object") throw new Error("settingsInvalid");
-  const candidate = value as Record<string, unknown>;
-  const locale = candidate.locale;
-  if (locale !== "zh_CN" && locale !== "en") {
-    throw new Error("settingsInvalid");
+  const v7 = legacyV7Schema.safeParse(value);
+  if (v7.success) {
+    const { chunkedReading: _removed, ...settings } = v7.data;
+    return parseStoredSettings({ ...settings, version: SETTINGS_VERSION });
   }
-  if (!("provider" in candidate)) throw new Error("settingsInvalid");
-
-  if (!("version" in candidate)) {
-    const legacy = candidate as unknown as LegacySettingsV1;
+  const v6 = legacyV6Schema.safeParse(value);
+  if (v6.success) {
+    return parseStoredSettings({
+      ...v6.data,
+      version: 7,
+      providers: v6.data.providers.map((profile) => ({
+        ...profile,
+        config: { ...profile.config, protocol: "chat-completions" },
+      })),
+    });
+  }
+  const v5 = legacyV5Schema.safeParse(value);
+  if (v5.success) {
+    return parseStoredSettings({
+      ...v5.data,
+      version: 6,
+      chunkedReading: false,
+      providers: v5.data.providers.map((profile) => ({
+        ...profile,
+        config: { ...profile.config, capabilities: { ...profile.config.capabilities, webSearch: { status: "unknown" } } },
+      })),
+    });
+  }
+  const current = settingsSchema.safeParse(value);
+  if (current.success) {
     return {
-      version: SETTINGS_VERSION,
-      enabled: true,
-      locale,
-      provider: legacy.provider,
-      resultDisplayMode: "floating",
-      allowMultiTab: false,
+      ...current.data,
+      providers: current.data.providers.map((profile) => ({
+        ...profile,
+        config: parseProviderConfig(profile.config),
+      })),
     };
   }
-
-  const resultDisplayMode = candidate.resultDisplayMode;
-  if (candidate.version === 2) {
-    if (resultDisplayMode !== "floating" && resultDisplayMode !== "inline") {
-      throw new Error("settingsInvalid");
-    }
-    const legacy = candidate as unknown as LegacySettingsV2;
-    return {
-      version: SETTINGS_VERSION,
-      enabled: true,
-      locale,
-      provider: legacy.provider,
-      resultDisplayMode: legacy.resultDisplayMode,
-      allowMultiTab: false,
+  const parsedLegacy = legacySettingsSchema.safeParse(value);
+  if (!parsedLegacy.success) throw new Error("settingsInvalid");
+  const legacy = parsedLegacy.data;
+  const settings = createDefaultSettings(legacy.locale);
+  settings.enabled = "enabled" in legacy ? legacy.enabled : true;
+  settings.resultDisplayMode =
+    "resultDisplayMode" in legacy ? legacy.resultDisplayMode : "floating";
+  settings.allowMultiTab =
+    "allowMultiTab" in legacy ? legacy.allowMultiTab : false;
+  if (legacy.provider) {
+    const { supportsVision, ...provider } = legacy.provider;
+    const capabilities = createUnknownCapabilities();
+    if (supportsVision)
+      capabilities.vision = { status: "supported", checkedAt: null };
+    settings.providers = [
+      {
+        id: "default",
+        name: provider.model.trim(),
+        config: parseProviderConfig({ ...provider, protocol: "chat-completions", capabilities }),
+      },
+    ];
+    settings.taskModels = {
+      chat: "default",
+      text: "default",
+      vision: "default",
+      automation: "default",
     };
   }
-  if (candidate.version === 3) {
-    if (
-      typeof candidate.enabled !== "boolean" ||
-      (resultDisplayMode !== "floating" && resultDisplayMode !== "inline")
-    ) {
-      throw new Error("settingsInvalid");
-    }
-    const legacy = candidate as unknown as LegacySettingsV3;
-    return {
-      version: SETTINGS_VERSION,
-      enabled: legacy.enabled,
-      locale,
-      provider: legacy.provider,
-      resultDisplayMode: legacy.resultDisplayMode,
-      allowMultiTab: false,
-    };
-  }
-  if (
-    candidate.version !== SETTINGS_VERSION ||
-    typeof candidate.enabled !== "boolean" ||
-    typeof candidate.allowMultiTab !== "boolean" ||
-    (resultDisplayMode !== "floating" && resultDisplayMode !== "inline")
-  ) {
-    throw new Error("settingsInvalid");
-  }
-
-  return candidate as unknown as StoredSettings;
+  return settings;
 }
 
 // Validates the connection fields before any request is sent to the provider.
-export function parseProviderCredentials(
-  input: ProviderCredentials,
-): ProviderCredentials {
-  const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
-  const apiKey = input.apiKey.trim();
+export function parseProviderCredentials(input: unknown): ProviderCredentials {
+  const parsed = credentialsSchema.safeParse(input);
+  if (!parsed.success) throw new Error("settingsInvalid");
+  const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, "");
+  const apiKey = parsed.data.apiKey.trim();
 
   if (!baseUrl) throw new Error("baseUrlRequired");
   if (!apiKey) throw new Error("apiKeyRequired");
@@ -143,19 +271,24 @@ export function parseProviderCredentials(
   }
   if (
     url.pathname.endsWith("/chat/completions") ||
-    url.pathname.endsWith("/models")
+    url.pathname.endsWith("/models") ||
+    url.pathname.endsWith("/responses") ||
+    url.pathname.endsWith("/messages") ||
+    /:streamGenerateContent$|:generateContent$/.test(url.pathname)
   ) {
     throw new Error("baseUrlEndpoint");
   }
 
-  return { baseUrl, apiKey };
+  return { baseUrl, apiKey, protocol: parsed.data.protocol };
 }
 
 // Validates and normalizes the complete provider form before it is persisted.
-export function parseProviderConfig(input: ProviderConfig): ProviderConfig {
-  const credentials = parseProviderCredentials(input);
-  const model = input.model.trim();
-  const targetLanguage = input.targetLanguage.trim();
+export function parseProviderConfig(input: unknown): ProviderConfig {
+  const parsed = providerSchema.safeParse(input);
+  if (!parsed.success) throw new Error("settingsInvalid");
+  const credentials = parseProviderCredentials(parsed.data);
+  const model = parsed.data.model.trim();
+  const targetLanguage = parsed.data.targetLanguage.trim();
 
   if (!model) throw new Error("modelRequired");
   if (!targetLanguage) throw new Error("targetLanguageRequired");
@@ -163,9 +296,31 @@ export function parseProviderConfig(input: ProviderConfig): ProviderConfig {
   return {
     ...credentials,
     model,
-    supportsVision: input.supportsVision,
+    capabilities: parsed.data.capabilities,
     targetLanguage,
   };
+}
+
+export function getTaskProvider(
+  settings: StoredSettings,
+  task: ModelTask,
+): ProviderConfig | null {
+  const id = settings.taskModels[task];
+  if (id === null) return null;
+  const profile = settings.providers.find((item) => item.id === id);
+  if (!profile) throw new Error("settingsInvalid");
+  return profile.config;
+}
+
+export function requireModelCapability(
+  provider: ProviderConfig,
+  capability: ModelCapability,
+): void {
+  const result = provider.capabilities[capability];
+  if (capability === "vision" && result.status !== "supported")
+    throw new Error("visionRequired");
+  if (capability === "webSearch" && result.status !== "supported")
+    throw new Error("webSearchCheckRequired");
 }
 
 // Returns the configured OpenAI-compatible Chat Completions endpoint.
@@ -176,6 +331,12 @@ export function getChatCompletionsUrl(baseUrl: string): string {
 // Returns the standard OpenAI-compatible model-list endpoint.
 export function getModelsUrl(baseUrl: string): string {
   return `${baseUrl}/models`;
+}
+
+// Returns the exact host pattern needed for the configured provider endpoint.
+export function getProviderHostPermission(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  return `${url.protocol}//${url.hostname}/*`;
 }
 
 // Loads settings while preserving the explicit first-run state when no value exists.
@@ -195,46 +356,27 @@ export async function loadSettings(
 
 // Persists the complete settings object as one coherent configuration revision.
 export async function saveSettings(settings: StoredSettings): Promise<void> {
-  await browser.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings });
+  await browser.storage.local.set({
+    [SETTINGS_STORAGE_KEY]: parseStoredSettings(settings),
+  });
 }
 
 // Validates the independently versioned collection of reusable page tasks.
 export function parseStoredPageWorkflows(value: unknown): StoredPageWorkflows {
-  if (!value || typeof value !== "object") {
-    throw new Error("pageWorkflowsInvalid");
-  }
-  const candidate = value as Record<string, unknown>;
-  if (candidate.version !== PAGE_WORKFLOWS_VERSION) {
-    throw new Error("pageWorkflowsInvalid");
-  }
-  if (!Array.isArray(candidate.workflows)) {
-    throw new Error("pageWorkflowsInvalid");
-  }
-
-  const ids = new Set<string>();
-  for (const item of candidate.workflows) {
-    if (!item || typeof item !== "object") {
-      throw new Error("pageWorkflowsInvalid");
-    }
-    const workflow = item as Record<string, unknown>;
-    if (
-      typeof workflow.id !== "string" ||
-      !workflow.id ||
-      workflow.id !== workflow.id.trim() ||
-      ids.has(workflow.id) ||
-      typeof workflow.name !== "string" ||
-      !workflow.name ||
-      workflow.name !== workflow.name.trim() ||
-      typeof workflow.task !== "string" ||
-      !workflow.task ||
-      workflow.task !== workflow.task.trim()
-    ) {
-      throw new Error("pageWorkflowsInvalid");
-    }
-    ids.add(workflow.id);
-  }
-
-  return candidate as unknown as StoredPageWorkflows;
+  const text = z.string().min(1).refine((input) => input === input.trim());
+  const workflow = z.object({ id: text, name: text, task: text }).strict();
+  const schema = z.discriminatedUnion("version", [
+    z.object({ version: z.literal(1), workflows: z.array(workflow) }).strict(),
+    z.object({ version: z.literal(2), workflows: z.array(workflow.extend({ allowedOrigins: z.array(z.string()) })) }).strict(),
+  ]);
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new Error("pageWorkflowsInvalid");
+  if (new Set(parsed.data.workflows.map((item) => item.id)).size !== parsed.data.workflows.length) throw new Error("pageWorkflowsInvalid");
+  const workflows = parsed.data.workflows.map((item) => {
+    getTemplateVariables(item.task);
+    return { ...item, allowedOrigins: "allowedOrigins" in item ? parseSiteOrigins(item.allowedOrigins) : [] };
+  });
+  return { version: PAGE_WORKFLOWS_VERSION, workflows };
 }
 
 // Loads saved page workflows without creating storage on first use.
@@ -253,8 +395,18 @@ export async function savePageWorkflows(
     version: PAGE_WORKFLOWS_VERSION,
     workflows,
   };
-  parseStoredPageWorkflows(stored);
-  await browser.storage.local.set({ [PAGE_WORKFLOWS_STORAGE_KEY]: stored });
+  await browser.storage.local.set({ [PAGE_WORKFLOWS_STORAGE_KEY]: parseStoredPageWorkflows(stored) });
+}
+
+export function exportPageWorkflows(workflows: SavedPageWorkflow[]): string {
+  return JSON.stringify(parseStoredPageWorkflows({ version: PAGE_WORKFLOWS_VERSION, workflows }), null, 2);
+}
+
+export function importPageWorkflows(text: string): SavedPageWorkflow[] {
+  if (new TextEncoder().encode(text).length > 2_000_000) throw new Error("workflowImportTooLarge");
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw new Error("pageWorkflowsInvalid"); }
+  return parseStoredPageWorkflows(value).workflows.map((workflow) => ({ ...workflow, id: crypto.randomUUID() }));
 }
 
 // Validates persisted page-task records before they are rendered in the panel.

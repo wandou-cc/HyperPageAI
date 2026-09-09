@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { browser } from "wxt/browser";
+import { message as notify } from "../components/ui/toast";
 
 import { PageController } from "../lib/page-controller";
 import type {
@@ -26,6 +27,7 @@ interface AgentTestController {
   automationMask: HTMLDivElement | null;
   executeAgentCommand(
     command: AgentPageCommand,
+    allowedOrigins?: string[],
   ): Promise<AgentPageCommandResult>;
 }
 
@@ -140,9 +142,67 @@ describe("selection extraction", () => {
     image.setAttribute("aria-label", "Architecture diagram");
     expect(getAccessibleName(image)).toBe("Architecture diagram");
   });
+
+  it("excludes standard protected fields and hidden descendants from selected content", () => {
+    for (const autocomplete of ["current-password", "new-password", "one-time-code", "section-pay billing cc-number", "cc-csc"]) {
+      const input = document.createElement("input");
+      input.setAttribute("autocomplete", autocomplete);
+      input.value = "sensitive-value";
+      expect(getElementText(input)).toBe("");
+      expect(createSelectionSnapshot(input).editable).toBe(false);
+    }
+    const section = document.createElement("section");
+    section.innerHTML = '<span>Visible</span><span hidden>Hidden</span><textarea autocomplete="one-time-code">123456</textarea>';
+    expect(getElementText(section)).toBe("Visible");
+  });
 });
 
 describe("page controller", () => {
+  it("keeps the read-video message channel open until subtitles resolve and propagates extraction errors", async () => {
+    const videoId = "abcdefghijk";
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const originalLocation = location;
+    vi.stubGlobal("location", { href: url });
+    document.body.innerHTML = '<video class="html5-main-video"></video>';
+    const listeners = vi.spyOn(browser.runtime.onMessage, "addListener");
+    const sendMessage = vi.spyOn(browser.runtime, "sendMessage").mockImplementation(async () => ({ ok: true, data: {
+      videoId, url, title: "Lecture", languageCode: "en",
+      xml: '<timedtext format="3"><body><p t="2000">Direct subtitles</p></body></timedtext>',
+    } }));
+    const controller = new PageController({ locale: "en", resultDisplayMode: "floating" });
+    try {
+      const listener = listeners.mock.calls.at(-1)?.[0];
+      if (!listener) throw new Error("Missing controller message listener");
+      const respond = vi.fn();
+      const message = { target: "reading-content", command: { type: "read-video" } };
+      const sender = { id: browser.runtime.id };
+      expect(listener(message, sender, respond)).toBe(true);
+      expect(respond).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: true, data: expect.objectContaining({
+        videoId, blocks: [expect.objectContaining({ text: "Direct subtitles", timeSeconds: 2 })],
+      }) }));
+      sendMessage.mockImplementation(async () => ({ ok: false, error: "youtubeCaptionsAccessDenied" }));
+      respond.mockClear();
+      expect(listener(message, sender, respond)).toBe(true);
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: false, error: "youtubeCaptionsAccessDenied" }));
+    } finally {
+      controller.destroy();
+      listeners.mockRestore();
+      sendMessage.mockRestore();
+      vi.stubGlobal("location", originalLocation);
+    }
+  });
+
+  it("refuses reading or writing a page outside the task scope while still allowing cleanup", async () => {
+    const { controller, agent, input, rectSpy } = createAgentFixture();
+    try {
+      await expect(agent.executeAgentCommand({ type: "get-browser-state" }, ["https://allowed.example"])).rejects.toThrow("siteScopeDenied");
+      await expect(agent.executeAgentCommand({ type: "input-text", index: 0, text: "blocked" }, ["https://allowed.example"])).rejects.toThrow("siteScopeDenied");
+      expect(input.value).toBe("Alice");
+      await expect(agent.executeAgentCommand({ type: "dispose" }, ["https://allowed.example"])).resolves.toBeNull();
+    } finally { controller.destroy(); rectSpy.mockRestore(); }
+  });
+
   it("selects without activating the page and manages AI result mutations", async () => {
     document.body.innerHTML =
       '<section><a href="#opened">Open</a><input value="draft"></section>';
@@ -203,7 +263,10 @@ describe("page controller", () => {
     input.dispatchEvent(
       new MouseEvent("click", { bubbles: true, cancelable: true }),
     );
-    controller.execute({ type: "replace-editable", text: "polished" });
+    const preview = controller.executeEditing({ type: "prepare-edit", mode: "replace", text: "polished", selectionRevision: controller.execute({ type: "get-page-state" }).selectionRevision });
+    if (!preview || !("before" in preview)) throw new Error("Missing edit preview");
+    expect(input.value).toBe("draft");
+    controller.executeEditing({ type: "apply-edit", previewId: preview.id });
     expect(input.value).toBe("polished");
     controller.execute({ type: "undo-replace" });
     expect(input.value).toBe("draft");
@@ -242,6 +305,27 @@ describe("page controller", () => {
     expect(disconnectedState.selection).toBeNull();
     expect(disconnectedState.selectionRevision).toBeGreaterThan(revision);
     controller.destroy();
+  });
+
+  it("does not read a text selection from a protected editable field", () => {
+    document.body.innerHTML = '<div contenteditable="true" autocomplete="one-time-code">123456</div>';
+    const target = document.querySelector("div");
+    const selection = window.getSelection();
+    if (!target || !selection) throw new Error("Missing protected selection fixture");
+    const controller = new PageController({ locale: "en", resultDisplayMode: "floating" });
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const read = vi.spyOn(selection, "toString");
+    try {
+      document.dispatchEvent(new Event("selectionchange"));
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      controller.destroy();
+      selection.removeAllRanges();
+      read.mockRestore();
+    }
   });
 
   it("routes page-level AI results to the configured destination", async () => {
@@ -342,18 +426,17 @@ describe("page controller", () => {
       ok: false,
       error: "apiRequestFailed:500:Service unavailable",
     } as never);
+    const errorNotice = vi.spyOn(notify, "error");
     image.dispatchEvent(new MouseEvent("pointermove", { bubbles: true }));
     controls.imageTrigger.click();
     controls.imagePromptButton.click();
     await vi.waitFor(() => {
-      expect(controls.floatingResult.dataset.variant).toBe("error");
+      expect(errorNotice).toHaveBeenCalledWith("API request failed (500): Service unavailable");
     });
-    expect(controls.floatingResult.textContent).toContain("Failed");
-    expect(controls.floatingResult.textContent).toContain(
-      "API request failed (500): Service unavailable",
-    );
+    expect(controls.floatingResult.textContent).not.toContain("Service unavailable");
     expect(document.querySelector('[data-hyperpage-ui="result"]')).toBeNull();
 
+    errorNotice.mockRestore();
     sendMessage.mockRestore();
     selection.removeAllRanges();
     controller.destroy();
@@ -630,6 +713,46 @@ describe("page controller", () => {
 
     fixture.controller.destroy();
     fixture.rectSpy.mockRestore();
+  });
+
+  it("blocks protected writes and attribute changes without partially applying mutations", async () => {
+    const fixture = createAgentFixture();
+    try {
+      await fixture.agent.executeAgentCommand({ type: "update-tree" });
+      const password = document.querySelector<HTMLInputElement>('input[type="password"]');
+      if (!password) throw new Error("Missing protected fixture");
+      for (const command of [
+        { type: "input-text", index: 2, text: "changed" },
+        { type: "modify-element", index: 2, changes: [{ type: "remove-attribute", name: "type" }] },
+        { type: "remove-element", index: 2 },
+      ] satisfies AgentPageCommand[]) {
+        await expect(fixture.agent.executeAgentCommand(command)).resolves.toMatchObject({ success: false });
+      }
+      expect(password.value).toBe("top-secret");
+      expect(password.type).toBe("password");
+      for (const autocomplete of ["one-time-code", "cc-number", "cc-csc"]) {
+        fixture.input.setAttribute("autocomplete", autocomplete);
+        await expect(fixture.agent.executeAgentCommand({ type: "input-text", index: 1, text: "changed" })).resolves.toMatchObject({ success: false });
+        const state = await fixture.agent.executeAgentCommand({ type: "get-browser-state" }) as AgentBrowserState;
+        expect(state.content).not.toContain("Alice");
+      }
+      fixture.input.removeAttribute("autocomplete");
+      await expect(fixture.agent.executeAgentCommand({ type: "modify-element", index: 1, changes: [
+        { type: "set-style", name: "color", value: "red" },
+        { type: "set-attribute", name: "onclick", value: "alert(1)" },
+      ] })).resolves.toMatchObject({ success: false });
+      expect(fixture.input.style.color).toBe("");
+      expect(fixture.input.getAttribute("onclick")).toBeNull();
+      await expect(fixture.agent.executeAgentCommand({ type: "modify-element", index: 1, changes: [
+        { type: "set-style", name: "color", value: "red" },
+        { type: "set-style", name: "background-image", value: "url(https://external.example/track)" },
+      ] })).resolves.toMatchObject({ success: false });
+      expect(fixture.input.style.color).toBe("");
+      expect(fixture.input.style.backgroundImage).toBe("");
+    } finally {
+      fixture.controller.destroy();
+      fixture.rectSpy.mockRestore();
+    }
   });
 
   it("keeps automation feedback visible between agent steps", async () => {

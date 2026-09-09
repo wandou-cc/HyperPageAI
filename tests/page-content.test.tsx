@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createDefaultSettings } from "../shared/settings";
 
 const browserMock = vi.hoisted(() => ({
   i18n: {
     getUILanguage: vi.fn(() => "zh-CN"),
   },
   runtime: {
+    getURL: vi.fn((path: string) => `chrome-extension://test${path}`),
     sendMessage: vi.fn(),
   },
   storage: {
@@ -55,10 +57,23 @@ beforeEach(() => {
   vi.clearAllMocks();
   document.body.replaceChildren();
   browserMock.storage.local.get.mockResolvedValue({});
-  browserMock.runtime.sendMessage.mockResolvedValue({ ok: true, data: false });
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response(":root { --background: white; } .hp-panel { display: flex; }"),
+      ),
+  );
 });
 
 describe("page content UI host", () => {
+  it("is built for explicit runtime injection instead of page-load registration", () => {
+    expect(contentScript.registration).toBe("runtime");
+    expect(contentScript.matches).toEqual([]);
+    expect(contentScript.cssInjectionMode).toBe("manual");
+  });
+
   it("enters the top layer after mount without losing protected host styles", async () => {
     const shadowHost = document.createElement("hyperpage-panel");
     const shadow = shadowHost.attachShadow({ mode: "open" });
@@ -88,6 +103,10 @@ describe("page content UI host", () => {
     await contentScript.main({ onInvalidated: vi.fn() } as never);
 
     expect(mount).toHaveBeenCalledOnce();
+    expect(createShadowRootUiMock.mock.calls[0]?.[1].mode).toBe("closed");
+    expect(createShadowRootUiMock.mock.calls[0]?.[1].css).toContain(
+      ":host { --background: white; }",
+    );
     expect(shadowHost.getAttribute("popover")).toBe("manual");
     expect(showPopover).toHaveBeenCalledOnce();
     expect(shadowHost.style.getPropertyValue("position")).toBe("fixed");
@@ -96,18 +115,14 @@ describe("page content UI host", () => {
     expect(shadowHost.style.getPropertyPriority("z-index")).toBe("important");
   });
 
-  it("mounts no page entry or controller while the extension is disabled", async () => {
+  it("removes an activated page when disabled and does not remount on enable", async () => {
     const disabledSettings = {
-      version: 4,
+      ...createDefaultSettings("zh-CN"),
       enabled: false,
-      locale: "zh_CN",
-      provider: null,
-      resultDisplayMode: "floating",
-      allowMultiTab: false,
     } as const;
     const enabledSettings = { ...disabledSettings, enabled: true } as const;
     browserMock.storage.local.get.mockResolvedValue({
-      "hyperpage.settings": disabledSettings,
+      "hyperpage.settings": enabledSettings,
     });
 
     const shadowHost = document.createElement("hyperpage-panel");
@@ -132,31 +147,14 @@ describe("page content UI host", () => {
     }
     await contentScript.main({ onInvalidated: vi.fn() } as never);
 
-    expect(pageControllerMock.construct).not.toHaveBeenCalled();
-    expect(createShadowRootUiMock).not.toHaveBeenCalled();
+    expect(pageControllerMock.construct).toHaveBeenCalledWith(enabledSettings);
+    expect(mount).toHaveBeenCalledOnce();
     const handleStorageChange =
       browserMock.storage.onChanged.addListener.mock.calls.at(-1)?.[0];
     if (!handleStorageChange) {
       throw new Error("Storage change listener was not registered");
     }
 
-    browserMock.storage.local.get.mockResolvedValue({
-      "hyperpage.settings": enabledSettings,
-    });
-    handleStorageChange(
-      { "hyperpage.settings": { newValue: enabledSettings } },
-      "local",
-    );
-    await vi.waitFor(() => {
-      expect(pageControllerMock.construct).toHaveBeenCalledWith(
-        enabledSettings,
-      );
-      expect(mount).toHaveBeenCalledOnce();
-    });
-
-    browserMock.storage.local.get.mockResolvedValue({
-      "hyperpage.settings": disabledSettings,
-    });
     handleStorageChange(
       { "hyperpage.settings": { newValue: disabledSettings } },
       "local",
@@ -165,5 +163,12 @@ describe("page content UI host", () => {
       expect(pageControllerMock.destroy).toHaveBeenCalledOnce();
       expect(remove).toHaveBeenCalledOnce();
     });
+
+    handleStorageChange(
+      { "hyperpage.settings": { newValue: enabledSettings } },
+      "local",
+    );
+    expect(pageControllerMock.construct).toHaveBeenCalledOnce();
+    expect(mount).toHaveBeenCalledOnce();
   });
 });

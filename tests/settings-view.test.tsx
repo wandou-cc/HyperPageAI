@@ -1,16 +1,23 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
-} from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+} from "./render-with-messages";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "../components/ui/tooltip";
 import { SettingsView } from "../entrypoints/sidepanel/SettingsView";
+import {
+  createDefaultSettings,
+  createUnknownCapabilities,
+} from "../shared/settings";
+import type { BackgroundRequest, StoredSettings } from "../shared/messages";
 
 const browserMock = vi.hoisted(() => ({
+  permissions: { request: vi.fn() },
   runtime: {
     sendMessage: vi.fn(),
   },
@@ -23,13 +30,136 @@ const browserMock = vi.hoisted(() => ({
 
 vi.mock("wxt/browser", () => ({ browser: browserMock }));
 
+beforeEach(() => {
+  browserMock.permissions.request.mockResolvedValue(true);
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("provider settings view", () => {
+  it.each(["OpenAI Responses", "Anthropic Claude", "Google Gemini"])("loads and saves the selected %s protocol", async (label) => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    const settings = providerSettings();
+    const first = settings.providers[0];
+    if (!first) throw new Error("Missing provider");
+    first.config.capabilities.vision = { status: "supported", checkedAt: 100 };
+    browserMock.runtime.sendMessage.mockResolvedValue({ ok: true, data: ["One-model"] });
+    const onSaved = vi.fn();
+    render(<TooltipProvider><SettingsView settings={settings} onSaved={onSaved} /></TooltipProvider>);
+    fireEvent.click(screen.getByRole("combobox", { name: "API protocol" }));
+    const option = await screen.findByRole("option", { name: label });
+    fireEvent.pointerDown(option);
+    fireEvent.click(option);
+    fireEvent.click(screen.getByRole("button", { name: "Get models" }));
+    const protocol = label === "OpenAI Responses" ? "responses" : label === "Anthropic Claude" ? "anthropic" : "gemini";
+    await waitFor(() => expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "list-models", credentials: { protocol, baseUrl: "https://one.example/v1", apiKey: "One-key" } })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ providers: [
+      expect.objectContaining({ config: expect.objectContaining({ protocol, capabilities: expect.objectContaining({ vision: { status: "unknown" } }) }) }),
+      expect.objectContaining({ config: expect.objectContaining({ protocol: "chat-completions" }) }),
+    ] }));
+  });
+
+  const providerSettings = (): StoredSettings => ({
+    ...createDefaultSettings("en"),
+    providers: ["One", "Two"].map((name) => ({
+      id: name,
+      name,
+      config: {
+        protocol: "chat-completions",
+        baseUrl: `https://${name.toLowerCase()}.example/v1`,
+        apiKey: `${name}-key`,
+        model: `${name}-model`,
+        targetLanguage: "English",
+        capabilities: createUnknownCapabilities(),
+      },
+    })),
+    taskModels: { chat: "One", text: "One", vision: "Two", automation: "Two" },
+  });
+
+  it("keeps model configurations separate and persists explicit task assignments", async () => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    browserMock.runtime.sendMessage.mockResolvedValue({ ok: true, data: null });
+    const onSaved = vi.fn();
+    render(
+      <TooltipProvider>
+        <SettingsView settings={providerSettings()} onSaved={onSaved} />
+      </TooltipProvider>,
+    );
+    await act(async () =>
+      fireEvent.click(
+        screen.getByRole("combobox", { name: "Configured models" }),
+      ),
+    );
+    const secondProfile = screen.getByRole("option", { name: "Two-model (Two)" });
+    expect(secondProfile).toBeVisible();
+    fireEvent.pointerDown(secondProfile);
+    fireEvent.click(secondProfile);
+    expect(screen.getByLabelText("API Key")).toHaveValue("Two-key");
+    fireEvent.change(screen.getByLabelText("Configuration name"), {
+      target: { value: "Image service" },
+    });
+    await act(async () =>
+      fireEvent.click(
+        screen.getByRole("combobox", { name: "Conversation and reading" }),
+      ),
+    );
+    const imageModel = screen.getByRole("option", { name: "Two-model (Image service)" });
+    expect(imageModel).toBeVisible();
+    fireEvent.pointerDown(imageModel);
+    fireEvent.click(imageModel);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const saved = onSaved.mock.calls[0]?.[0] as StoredSettings;
+    expect(saved.providers).toHaveLength(2);
+    expect(saved.providers[0]?.config.apiKey).toBe("One-key");
+    expect(saved.providers[1]?.name).toBe("Image service");
+    expect(saved.taskModels).toEqual({
+      chat: "Two",
+      text: "One",
+      vision: "Two",
+      automation: "Two",
+    });
+    expect(browserMock.permissions.request).toHaveBeenCalledExactlyOnceWith({
+      origins: ["https://one.example/*", "https://two.example/*"],
+    });
+  });
+
+  it("clears assignments when their model configuration is deleted", async () => {
+    browserMock.runtime.sendMessage.mockResolvedValue({ ok: true, data: null });
+    const onSaved = vi.fn();
+    render(
+      <TooltipProvider>
+        <SettingsView settings={providerSettings()} onSaved={onSaved} />
+      </TooltipProvider>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete model" }),
+    );
+    expect(screen.getByLabelText("API Key")).toHaveValue("Two-key");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskModels: {
+            chat: null,
+            text: null,
+            vision: "Two",
+            automation: "Two",
+          },
+          providers: [expect.objectContaining({ id: "Two" })],
+        }),
+      ),
+    );
+  });
+
   it("loads models and renders shadcn selectors for model and language", async () => {
     browserMock.runtime.sendMessage.mockResolvedValue({
       ok: true,
@@ -39,14 +169,7 @@ describe("provider settings view", () => {
     render(
       <TooltipProvider>
         <SettingsView
-          settings={{
-            version: 4,
-            enabled: true,
-            locale: "zh_CN",
-            provider: null,
-            resultDisplayMode: "floating",
-            allowMultiTab: false,
-          }}
+          settings={createDefaultSettings("zh-CN")}
           onSaved={vi.fn()}
         />
       </TooltipProvider>,
@@ -64,10 +187,14 @@ describe("provider settings view", () => {
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
 
     await waitFor(() => expect(modelSelect).toBeEnabled());
+    expect(browserMock.permissions.request).toHaveBeenCalledExactlyOnceWith({
+      origins: ["https://api.example.com/*"],
+    });
     expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({
       target: "background",
       type: "list-models",
       credentials: {
+        protocol: "chat-completions",
         baseUrl: "https://api.example.com/v1",
         apiKey: "secret",
       },
@@ -87,14 +214,7 @@ describe("provider settings view", () => {
     render(
       <TooltipProvider>
         <SettingsView
-          settings={{
-            version: 4,
-            enabled: true,
-            locale: "zh_CN",
-            provider: null,
-            resultDisplayMode: "floating",
-            allowMultiTab: false,
-          }}
+          settings={createDefaultSettings("zh-CN")}
           onSaved={onSaved}
         />
       </TooltipProvider>,
@@ -105,20 +225,14 @@ describe("provider settings view", () => {
 
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith({
-        version: 4,
-        enabled: true,
-        locale: "zh_CN",
-        provider: null,
+        ...createDefaultSettings("zh-CN"),
         resultDisplayMode: "inline",
         allowMultiTab: false,
       });
     });
     expect(browserMock.storage.local.set).toHaveBeenCalledWith({
       "hyperpage.settings": {
-        version: 4,
-        enabled: true,
-        locale: "zh_CN",
-        provider: null,
+        ...createDefaultSettings("zh-CN"),
         resultDisplayMode: "inline",
         allowMultiTab: false,
       },
@@ -127,18 +241,15 @@ describe("provider settings view", () => {
 
   it("persists the explicit multi-tab task switch", async () => {
     vi.stubGlobal("PointerEvent", MouseEvent);
+    browserMock.runtime.sendMessage.mockResolvedValue({
+      ok: true,
+      data: null,
+    });
     const onSaved = vi.fn();
     render(
       <TooltipProvider>
         <SettingsView
-          settings={{
-            version: 4,
-            enabled: true,
-            locale: "zh_CN",
-            provider: null,
-            resultDisplayMode: "floating",
-            allowMultiTab: false,
-          }}
+          settings={createDefaultSettings("zh-CN")}
           onSaved={onSaved}
         />
       </TooltipProvider>,
@@ -153,13 +264,37 @@ describe("provider settings view", () => {
 
     await waitFor(() => {
       expect(onSaved).toHaveBeenCalledWith({
-        version: 4,
-        enabled: true,
-        locale: "zh_CN",
-        provider: null,
+        ...createDefaultSettings("zh-CN"),
         resultDisplayMode: "floating",
         allowMultiTab: true,
       });
     });
+    expect(browserMock.permissions.request).toHaveBeenCalledExactlyOnceWith({
+      origins: ["http://*/*", "https://*/*"],
+    });
+  });
+
+  it("saves model configuration without a long-content processing option", async () => {
+    const onSaved = vi.fn();
+    render(<TooltipProvider><SettingsView settings={providerSettings()} onSaved={onSaved} /></TooltipProvider>);
+    expect(screen.queryByRole("switch", { name: "Process long content in chunks" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(providerSettings()));
+    expect(screen.getByRole("dialog", { name: "Settings saved" })).toBeVisible();
+  });
+
+  it("does not persist settings when the combined host grant is denied", async () => {
+    browserMock.permissions.request.mockResolvedValue(false);
+    const onSaved = vi.fn();
+    render(
+      <TooltipProvider>
+        <SettingsView settings={providerSettings()} onSaved={onSaved} />
+      </TooltipProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alertdialog", { hidden: true })).toHaveTextContent("access");
+    expect(browserMock.permissions.request).toHaveBeenCalledOnce();
+    expect(browserMock.storage.local.set).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });

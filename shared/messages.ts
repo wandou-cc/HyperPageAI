@@ -1,3 +1,6 @@
+import type { WritingOptions } from "./writing";
+import type { PageTranslationCommand, TranslatePageRequest } from "./page-translation";
+
 export type Locale = "zh_CN" | "en";
 
 export type ResultDisplayMode = "floating" | "inline";
@@ -17,6 +20,7 @@ export type AiAction =
   | "ocr"
   | "image-prompt"
   | "polish"
+  | "write"
   | "custom";
 
 export interface ViewportRect {
@@ -55,40 +59,90 @@ export type PageStateCommand =
   | { type: "select-parent" }
   | { type: "cancel-selection" }
   | { type: "get-page-state" }
-  | { type: "replace-editable"; text: string }
   | { type: "undo-replace" }
   | { type: "insert-result"; text: string }
   | { type: "remove-insertion" }
   | { type: "suspend-overlay" }
-  | { type: "restore-overlay" };
+  | { type: "restore-overlay" }
+  | { type: "check-capture-area"; rect: ViewportRect; viewport: { width: number; height: number } };
 
 export type PageCommand = PageStateCommand;
 
 export type PageCommandResult = PageState;
 
+export interface EditablePreview {
+  id: string;
+  mode: "replace" | "insert";
+  before: string;
+  after: string;
+}
+
+export type PageEditingCommand =
+  | { type: "prepare-edit"; mode: "replace" | "insert"; text: string; selectionRevision: number }
+  | { type: "apply-edit"; previewId: string }
+  | { type: "cancel-edit"; previewId: string };
+
+export interface PageEditingResults {
+  "prepare-edit": EditablePreview;
+  "apply-edit": PageState;
+  "cancel-edit": null;
+}
+
+export interface EditingContentRequest {
+  target: "editing-content";
+  command: PageEditingCommand;
+}
+
+export type ProviderProtocol = "chat-completions" | "responses" | "anthropic" | "gemini";
+
 export interface ProviderCredentials {
+  protocol: ProviderProtocol;
   baseUrl: string;
   apiKey: string;
 }
 
 export interface ProviderConfig extends ProviderCredentials {
   model: string;
-  supportsVision: boolean;
+  capabilities: ModelCapabilities;
   targetLanguage: string;
 }
 
+export type ModelCapability = "text" | "streaming" | "vision" | "tools" | "webSearch";
+
+export type CapabilityResult =
+  | { status: "unknown" }
+  | { status: "supported"; checkedAt: number | null }
+  | { status: "failed"; checkedAt: number; error: string };
+
+export type ModelCapabilities = Record<ModelCapability, CapabilityResult>;
+export type ModelTask = "chat" | "text" | "vision" | "automation";
+
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  config: ProviderConfig;
+}
+
 export interface StoredSettings {
-  version: 4;
+  version: 8;
   enabled: boolean;
   locale: Locale;
-  provider: ProviderConfig | null;
+  providers: ProviderProfile[];
+  taskModels: Record<ModelTask, string | null>;
   resultDisplayMode: ResultDisplayMode;
   allowMultiTab: boolean;
 }
 
+export interface HostAccessState {
+  origins: string[];
+  providers: Array<{ origin: string; granted: boolean }>;
+}
+
 export type RunAiRequest =
-  | { action: Exclude<AiAction, "custom"> }
+  | { action: Exclude<AiAction, "custom" | "write"> }
+  | { action: "write"; options: WritingOptions }
   | { action: "custom"; prompt: string };
+
 
 export type InlineAiRequest =
   | { action: "translate" | "explain" | "ocr" | "image-prompt" }
@@ -97,6 +151,120 @@ export type InlineAiRequest =
 export interface AiExecutionResult {
   content: string;
   selectionRevision: number | null;
+}
+
+export type ChatContextMode = "none" | "selection" | "page" | "elements" | "file" | "video";
+
+export interface PageContentBlock {
+  id: string;
+  text: string;
+  heading: string;
+  headingLevel: number | null;
+  timeSeconds?: number;
+}
+
+export interface FileContentBlock extends PageContentBlock {
+  pageNumber: number;
+}
+
+export interface FileReadingSnapshot {
+  id: string;
+  name: string;
+  format: "text" | "pdf";
+  pageCount: number;
+  blocks: FileContentBlock[];
+}
+
+export interface PageReadingSnapshot {
+  id: string;
+  title: string;
+  url: string;
+  videoId?: string;
+  sourceKind?: "search" | "article";
+  blocks: PageContentBlock[];
+}
+
+export interface PageReadingSelection {
+  snapshotId: string;
+  blockIds: string[];
+}
+
+export interface PageCitation extends PageContentBlock {
+  blockId: string;
+  snapshotId: string;
+  title: string;
+  url: string;
+  documentId?: string;
+  pageNumber?: number;
+}
+
+export type PageReadingCommand =
+  | { type: "read-page" }
+  | { type: "read-video" }
+  | { type: "get-video-selection"; selection: PageReadingSelection }
+  | { type: "locate-video-citation"; snapshotId: string; blockId: string }
+  | { type: "read-selected-element" }
+  | { type: "get-reading-selection"; selection: PageReadingSelection }
+  | { type: "locate-citation"; snapshotId: string; blockId: string }
+  | { type: "clear-reading" };
+
+export interface PageReadingResults {
+  "read-video": PageReadingSnapshot;
+  "get-video-selection": PageReadingSnapshot;
+  "locate-video-citation": null;
+  "read-page": PageReadingSnapshot;
+  "read-selected-element": PageReadingSnapshot;
+  "get-reading-selection": PageReadingSnapshot;
+  "locate-citation": null;
+  "clear-reading": null;
+}
+
+export interface ReadingContentRequest {
+  target: "reading-content";
+  command: PageReadingCommand;
+}
+
+export type ReadingContentResponse = CommandResult<PageReadingSnapshot | null>;
+
+export interface ChatModelMessage {
+  role: "user" | "assistant";
+  content: string;
+  imageDataUrl?: string;
+}
+
+export type ChatContextSnapshot =
+  | { type: "none" }
+  | { type: "image"; image: { id: string; name: string; dataUrl: string } }
+  | { type: "selection"; selection: SelectionSnapshot }
+  | { type: "page"; page: PageReadingSnapshot }
+  | { type: "elements"; pages: PageReadingSnapshot[] }
+  | { type: "file"; file: FileReadingSnapshot };
+
+export interface RunChatRequest {
+  history: ChatModelMessage[];
+  prompt: string;
+  context: ChatContextMode;
+  includeHistory: boolean;
+  webSearch?: boolean;
+  pageSelection?: PageReadingSelection;
+  elementSelections?: PageReadingSelection[];
+  file?: FileReadingSnapshot;
+  selectionRevision?: number;
+}
+
+export interface ReplayChatRequest {
+  prompt: string;
+  snapshot: ChatContextSnapshot;
+  includeHistory: boolean;
+  webSearch?: boolean;
+  history: ChatModelMessage[];
+}
+
+export interface ChatExecutionResult {
+  content: string;
+  userContent: string;
+  selectionRevision: number | null;
+  citations: PageCitation[];
 }
 
 export interface PageAgentExecutionResult {
@@ -108,10 +276,11 @@ export interface SavedPageWorkflow {
   id: string;
   name: string;
   task: string;
+  allowedOrigins: string[];
 }
 
 export interface StoredPageWorkflows {
-  version: 1;
+  version: 2;
   workflows: SavedPageWorkflow[];
 }
 
@@ -148,6 +317,24 @@ export type AgentElementMutation =
   | { type: "set-attribute"; name: string; value: string }
   | { type: "remove-attribute"; name: string }
   | { type: "set-text"; text: string };
+
+export const ALLOWED_ELEMENT_ATTRIBUTES = [
+  "title", "alt", "aria-label", "aria-description", "aria-expanded",
+  "aria-checked", "aria-hidden", "placeholder",
+] as const;
+
+export const ALLOWED_STYLE_PROPERTIES = [
+  "color", "background-color", "display", "visibility", "opacity",
+  "font-size", "font-weight", "font-family", "font-style", "line-height",
+  "text-align", "text-decoration", "white-space", "word-break", "overflow-wrap",
+  "width", "height", "min-width", "min-height", "max-width", "max-height",
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "border", "border-width", "border-color", "border-style", "border-radius",
+  "outline", "outline-width", "outline-color", "outline-style", "outline-offset",
+  "box-shadow", "text-shadow", "transform", "transform-origin", "overflow",
+  "gap", "row-gap", "column-gap", "align-items", "justify-content", "flex-direction",
+] as const;
 
 export type PageAgentAction =
   | { type: "click"; index: number }
@@ -251,13 +438,16 @@ export type AgentPageCommandResult =
   | null;
 
 export type BackgroundRequest =
-  | { target: "background"; type: "get-panel-visibility" }
-  | {
-      target: "background";
-      type: "set-panel-visibility";
-      visible: boolean;
-    }
+  | { target: "background"; type: "open-settings" }
+  | { target: "background"; type: "open-documents" }
+  | { target: "background"; type: "get-host-access" }
+  | { target: "background"; type: "revoke-host-access"; origin: string }
   | { target: "background"; type: "page-command"; command: PageCommand }
+  | { target: "background"; type: "reading-command"; command: PageReadingCommand }
+  | { target: "background"; type: "read-youtube-captions"; videoId: string }
+  | { target: "background"; type: "editing-command"; command: PageEditingCommand }
+  | { target: "background"; type: "translation-command"; command: PageTranslationCommand }
+  | { target: "background"; type: "translate-page"; requestId: string; request: TranslatePageRequest }
   | { target: "background"; type: "capture-selection" }
   | {
       target: "background";
@@ -265,6 +455,13 @@ export type BackgroundRequest =
       requestId: string;
       request: RunAiRequest;
     }
+  | {
+      target: "background";
+      type: "run-chat";
+      requestId: string;
+      request: RunChatRequest;
+    }
+  | { target: "background"; type: "replay-chat"; requestId: string; request: ReplayChatRequest }
   | {
       target: "background";
       type: "run-inline-ai";
@@ -277,6 +474,7 @@ export type BackgroundRequest =
       type: "run-page-agent";
       requestId: string;
       task: string;
+      allowedOrigins?: string[];
     }
   | {
       target: "background";
@@ -289,11 +487,6 @@ export type BackgroundRequest =
       target: "background";
       type: "list-models";
       credentials: ProviderCredentials;
-    }
-  | {
-      target: "background";
-      type: "test-connection";
-      provider: ProviderConfig;
     };
 
 export type ContentRequest = {
@@ -306,6 +499,7 @@ export type ContentResponse = CommandResult<PageCommandResult>;
 export type AgentContentRequest = {
   target: "page-agent-content";
   command: AgentPageCommand;
+  allowedOrigins: string[];
 };
 
 export type AgentContentResponse = CommandResult<AgentPageCommandResult>;
@@ -317,6 +511,7 @@ export type ContentEvent = {
 };
 
 export type PanelEvent =
+  | { target: "panel"; type: "toggle-panel" }
   | {
       target: "panel";
       type: "page-state-changed";
@@ -327,6 +522,18 @@ export type PanelEvent =
       type: "page-agent-progress";
       requestId: string;
       progress: PageAgentProgress;
+    }
+  | {
+      target: "panel";
+      type: "chat-delta";
+      requestId: string;
+      delta: string;
+    }
+  | {
+      target: "panel";
+      type: "chat-context";
+      requestId: string;
+      snapshot: ChatContextSnapshot;
     };
 
 export type CommandResult<T> =

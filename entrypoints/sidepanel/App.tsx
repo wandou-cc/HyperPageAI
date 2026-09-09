@@ -1,6 +1,9 @@
+import { message as notify, Toaster } from "@/components/ui/toast";
 import {
   ArrowLeft,
   BookmarkPlus,
+  BookOpen,
+  Captions,
   Bot,
   Check,
   ChevronDown,
@@ -9,7 +12,9 @@ import {
   CircleCheck,
   Clipboard,
   Copy,
+  Download,
   FileText,
+  MessageSquareText,
   Image,
   Info,
   History as HistoryIcon,
@@ -20,15 +25,16 @@ import {
   MessageCircleQuestion,
   Minimize2,
   MousePointer2,
-  PanelRight,
+  Paperclip,
   Pencil,
+  Plus,
   Play,
   RefreshCw,
   ScanText,
-  Send,
   Settings,
   Sparkles,
   Trash2,
+  Upload,
   WandSparkles,
   X,
   type LucideIcon,
@@ -36,6 +42,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -43,12 +50,16 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { copyText } from "../../shared/clipboard";
 import { browser } from "wxt/browser";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Attachment, AttachmentMedia, AttachmentContent, AttachmentTitle } from "@/components/ui/attachment";
 import { Badge } from "@/components/ui/badge";
+import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Card,
   CardAction,
@@ -68,7 +79,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import {
   InputGroup,
   InputGroupAddon,
@@ -76,6 +87,20 @@ import {
   InputGroupInput,
   InputGroupTextarea,
 } from "@/components/ui/input-group";
+import {
+  Message,
+  MessageContent,
+  MessageFooter,
+  MessageHeader,
+} from "@/components/ui/message";
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from "@/components/ui/message-scroller";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -86,6 +111,9 @@ import type {
   AiExecutionResult,
   AiAction,
   BackgroundRequest,
+  ChatContextMode,
+  ChatExecutionResult,
+  ChatContextSnapshot,
   CommandResult,
   PageAgentAction,
   PageAgentExecutionRecord,
@@ -94,27 +122,49 @@ import type {
   PageAgentProgress,
   PageState,
   PageStateCommand,
+  PageReadingSnapshot,
+  FileReadingSnapshot,
+  PageCitation,
   PanelEvent,
   RunAiRequest,
   SavedPageWorkflow,
   StoredSettings,
 } from "../../shared/messages";
-import { PANEL_VISIBILITY_STORAGE_KEY } from "../../shared/panel";
 import { isVisualSelection } from "../../shared/prompts";
+import { getConversationHistory, getTurnCitations, type ConversationTurn, type SavedConversation } from "../../shared/conversations";
+import { readTextFile } from "../../shared/files";
+import { answerToMarkdown, conversationToMarkdown, downloadText } from "../../shared/export";
+import { assertSiteAllowed, getTemplateVariables, parseSiteInput } from "../../shared/task-templates";
 import {
   addPageAgentExecutionRecord,
+  exportPageWorkflows,
+  importPageWorkflows,
   loadPageAgentHistory,
   loadPageWorkflows,
   loadSettings,
+  getTaskProvider,
   PAGE_AGENT_HISTORY_STORAGE_KEY,
   PAGE_WORKFLOWS_STORAGE_KEY,
   savePageAgentHistory,
   savePageWorkflows,
   SETTINGS_STORAGE_KEY,
 } from "../../shared/settings";
-import { SettingsView } from "./SettingsView";
+import { ReadingContext } from "./ReadingContext";
+import { SnapshotPreview } from "./SnapshotPreview";
+import { ElementsContext } from "./ElementsContext";
+import { ReadingAnswer } from "./ReadingAnswer";
+import { ConversationLibrary } from "./ConversationLibrary";
+import { TextExport } from "./TextExport";
+import { TemplateParameters } from "./TemplateParameters";
+import { PromptTemplates } from "./PromptTemplates";
+import { ResultActions } from "./ResultActions";
+import { WritingTools } from "./WritingTools";
+import { AiComposer } from "./AiComposer";
+import { PageTranslationTools, type TranslationPreview } from "./PageTranslationTools";
+import type { PageTranslationCommand, PageTranslationResult, TranslationDisplayMode, TranslationTerm } from "../../shared/page-translation";
 import { formatError, type MessageKey, t } from "./translations";
 import { IconTooltip } from "./ui";
+import { WebSearchToggle } from "./WebSearchToggle";
 
 type AiResult =
   | {
@@ -127,6 +177,18 @@ type AiResult =
       content: string;
       status: PageAgentExecutionStatus;
     };
+
+type ChatDisplayStatus = "streaming" | "complete" | "cancelled" | "failed";
+
+interface ChatDisplayMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  context?: ChatContextSnapshot["type"];
+  status?: ChatDisplayStatus;
+  citations?: PageCitation[];
+  turnIndex: number;
+}
 
 type CompletedPageAgentStep = Extract<
   PageAgentProgress,
@@ -231,10 +293,14 @@ async function sendBackgroundRequest<T>(
 }
 
 // Resolves the localized command label used for progress and result headings.
-function getActionLabelKey(action: AiAction | "operate-page"): MessageKey {
+function getActionLabelKey(
+  action: AiAction | "chat" | "operate-page" | "translate-page",
+): MessageKey {
   switch (action) {
     case "translate":
       return "translate";
+    case "translate-page":
+      return "pageTranslation";
     case "explain":
       return "explain";
     case "summarize":
@@ -245,7 +311,10 @@ function getActionLabelKey(action: AiAction | "operate-page"): MessageKey {
       return "imagePrompt";
     case "polish":
       return "polish";
+    case "write":
+      return "writingAssistant";
     case "custom":
+    case "chat":
       return "custom";
     case "operate-page":
       return "operatePage";
@@ -453,43 +522,19 @@ function PageAgentProgressView({
             {t(locale, "pageAgentAnswer")}
           </FieldLabel>
           <p className="break-words whitespace-pre-wrap text-sm">{question}</p>
-          <InputGroup>
-            <InputGroupTextarea
+          <AiComposer
               id="page-agent-answer"
-              className="min-h-16"
+              locale={locale}
               value={answer}
               autoFocus
               disabled={answerPending}
+              running={answerPending}
+              canSubmit={Boolean(answer.trim())}
+              submitLabel={t(locale, "sendAnswer")}
+              onSubmit={() => void submitAnswer()}
               placeholder={t(locale, "pageAgentAnswerPlaceholder")}
               onChange={(event) => setAnswer(event.target.value)}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "Enter" &&
-                  !event.shiftKey &&
-                  !event.nativeEvent.isComposing
-                ) {
-                  event.preventDefault();
-                  void submitAnswer();
-                }
-              }}
             />
-            <InputGroupAddon align="block-end">
-              <InputGroupButton
-                variant="default"
-                size="sm"
-                className="ml-auto"
-                disabled={answerPending || !answer.trim()}
-                onClick={() => void submitAnswer()}
-              >
-                {answerPending ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <Send data-icon="inline-start" />
-                )}
-                {t(locale, "sendAnswer")}
-              </InputGroupButton>
-            </InputGroupAddon>
-          </InputGroup>
         </Field>
       )}
 
@@ -567,48 +612,75 @@ export function App({ initialOpen }: AppProps) {
   const [panelOpen, setPanelOpen] = useState(initialOpen);
   const [settings, setSettings] = useState<StoredSettings | null>(null);
   const [initializationError, setInitializationError] = useState<string>();
-  const [view, setView] = useState<"main" | "settings">("main");
   const [pageState, setPageState] = useState<PageState>(EMPTY_PAGE_STATE);
   const [pageError, setPageError] = useState<string>();
-  const [error, setError] = useState<string>();
-  const [toast, setToast] = useState<string>();
   const [result, setResult] = useState<AiResult>();
   const [pending, setPending] = useState<{
     requestId: string;
-    action: AiAction | "operate-page";
+    action: AiAction | "chat" | "operate-page" | "translate-page";
   }>();
   const [customPrompt, setCustomPrompt] = useState("");
+  const [toolPrompt, setToolPrompt] = useState("");
+  const [chatContext, setChatContext] = useState<Exclude<ChatContextMode, "selection">>("none");
+  const [chatTurns, setChatTurns] = useState<ConversationTurn[]>([]);
+  const [webSearch, setWebSearch] = useState(false);
+  const [editingTurnIndex, setEditingTurnIndex] = useState<number | null>(null);
+  const [conversationLibraryOpen, setConversationLibraryOpen] = useState(false);
+  const [attachmentExpanded, setAttachmentExpanded] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [savedConversation, setSavedConversation] = useState<SavedConversation | null>(null);
+  const [readingSnapshot, setReadingSnapshot] = useState<PageReadingSnapshot | null>(null);
+  const [videoSnapshot, setVideoSnapshot] = useState<PageReadingSnapshot | null>(null);
+  const [videoBlockIds, setVideoBlockIds] = useState<string[]>([]);
+  const [readingBlockIds, setReadingBlockIds] = useState<string[]>([]);
+  const [readingLoading, setReadingLoading] = useState(false);
+  const [contextElements, setContextElements] = useState<PageReadingSnapshot[]>([]);
+  const [fileSnapshot, setFileSnapshot] = useState<FileReadingSnapshot | null>(null);
+  const [fileBlockIds, setFileBlockIds] = useState<string[]>([]);
+  const selectedReadingSnapshot = useMemo(() => {
+    if (!readingSnapshot) return null;
+    const selected = new Set(readingBlockIds);
+    return { ...readingSnapshot, blocks: readingSnapshot.blocks.filter((block) => selected.has(block.id)) };
+  }, [readingSnapshot, readingBlockIds]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const contextSelectionRevision = useRef<number | null>(null);
+  const [translationPreview, setTranslationPreview] = useState<TranslationPreview | null>(null);
+  const [translationMode, setTranslationMode] = useState<TranslationDisplayMode | null>(null);
   const [pageTask, setPageTask] = useState("");
-  const [mainTab, setMainTab] = useState("ai");
+  const [taskSites, setTaskSites] = useState("");
+  const [workflows, setWorkflows] = useState<SavedPageWorkflow[]>([]);
+  const [workflowEditor, setWorkflowEditor] = useState<WorkflowEditor>();
+  const [workflowMutationPending, setWorkflowMutationPending] = useState(false);
+  const workflowImportRef = useRef<HTMLInputElement>(null);
+  const [parameterTask, setParameterTask] = useState<{ template: string; allowedOrigins: string[] } | null>(null);
+  const [mainTab, setMainTab] = useState("chat");
+  const [documentsOpened, setDocumentsOpened] = useState(false);
   const [operateTab, setOperateTab] = useState("task");
   const [pageAgentRun, setPageAgentRun] = useState<PageAgentRunState>();
-  const [workflows, setWorkflows] = useState<SavedPageWorkflow[]>([]);
   const [executionHistory, setExecutionHistory] = useState<
     PageAgentExecutionRecord[]
   >([]);
-  const [workflowEditor, setWorkflowEditor] = useState<WorkflowEditor>();
-  const [workflowMutationPending, setWorkflowMutationPending] = useState(false);
   const [historyMutationPending, setHistoryMutationPending] = useState(false);
   const [selectionExpanded, setSelectionExpanded] = useState(false);
   const [panelWidth, setPanelWidth] = useState(() =>
     Math.min(PANEL_DEFAULT_WIDTH, window.innerWidth - 32),
   );
   const [panelHeight, setPanelHeight] = useState(() =>
-    Math.min(720, window.innerHeight - 110),
+    Math.min(720, window.innerHeight - 32),
   );
-  const [launcherPosition, setLauncherPosition] = useState<FloatingPosition>();
   const [panelPosition, setPanelPosition] = useState<FloatingPosition>();
-  const [launcherDragging, setLauncherDragging] = useState(false);
   const [panelDragging, setPanelDragging] = useState(false);
   const [panelResizing, setPanelResizing] = useState(false);
   const [panelHeightResizing, setPanelHeightResizing] = useState(false);
+  const pageSelecting = useRef(false);
   const selectionRevision = useRef(0);
   const activePageAgentRequestId = useRef<string | undefined>(undefined);
+  const activeChatRequestId = useRef<string | undefined>(undefined);
+  const pendingRequest = useRef(pending);
   const completedPageAgentSteps = useRef<CompletedPageAgentStep[]>([]);
-  const toastTimer = useRef<number | undefined>(undefined);
-  const launcherRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const pageTaskInputRef = useRef<HTMLTextAreaElement>(null);
+  const customPromptInputRef = useRef<HTMLTextAreaElement>(null);
   const pageTaskHighlightRef = useRef<HTMLDivElement>(null);
   const pageTaskSelectionInsertion = useRef<
     | {
@@ -620,27 +692,33 @@ export function App({ initialOpen }: AppProps) {
     | undefined
   >(undefined);
   const pageTaskCaret = useRef<number | undefined>(undefined);
-  const launcherDragSession = useRef<DragSession | undefined>(undefined);
   const panelDragSession = useRef<DragSession | undefined>(undefined);
   const panelResizeSession = useRef<PanelResizeSession | undefined>(undefined);
   const panelHeightResizeSession = useRef<PanelHeightResizeSession | undefined>(
     undefined,
   );
-  const suppressLauncherClick = useRef(false);
+  pendingRequest.current = pending;
 
-  const locale = settings?.locale ?? "en";
+  const locale = settings?.locale ?? (browser.i18n.getUILanguage().toLowerCase().startsWith("zh") ? "zh_CN" : "en");
   const selection = pageState.selection;
-  const provider = settings?.provider ?? null;
-
-  // Shows one short operation status without accumulating stale notifications.
-  const showToast = useCallback((message: string): void => {
-    window.clearTimeout(toastTimer.current);
-    setToast(message);
-    toastTimer.current = window.setTimeout(() => setToast(undefined), 2200);
-  }, []);
+  const hasProvider = Boolean(settings?.providers.length);
+  const supportsVision = settings ? getTaskProvider(settings, "vision")?.capabilities.vision.status === "supported" : false;
+  const webSearchCapability = settings ? getTaskProvider(settings, "chat")?.capabilities.webSearch : undefined;
+  useEffect(() => { setWebSearch(false); }, [webSearchCapability]);
+  useEffect(() => {
+    const revision = contextSelectionRevision.current;
+    if (revision === null || pageState.selecting) return;
+    contextSelectionRevision.current = null;
+    if (pageState.selection && pageState.selectionRevision !== revision) void handleAddContextElement();
+  }, [pageState]);
+  const chatMessages: ChatDisplayMessage[] = chatTurns.flatMap((turn, turnIndex) => [
+    { id: `user-${turn.id}`, role: "user", content: turn.prompt, context: turn.snapshot.type, turnIndex },
+    { id: `assistant-${turn.id}`, role: "assistant", content: turn.answer, status: turn.status, citations: getTurnCitations(chatTurns, turnIndex), turnIndex },
+  ]);
 
   // Applies page state and invalidates only results that depend on the old selection.
   const applyPageState = useCallback((nextState: PageState): void => {
+    pageSelecting.current = nextState.selecting;
     const taskInsertion = pageTaskSelectionInsertion.current;
     if (taskInsertion && !nextState.selecting) {
       pageTaskSelectionInsertion.current = undefined;
@@ -695,6 +773,21 @@ export function App({ initialOpen }: AppProps) {
     [],
   );
 
+  // Appends a streamed delta only to the assistant turn that requested it.
+  const applyChatDelta = useCallback(
+    (requestId: string, delta: string): void => {
+      if (requestId !== activeChatRequestId.current) return;
+      setChatTurns((turns) =>
+        turns.map((turn) =>
+          turn.id === requestId && turn.status === "streaming"
+            ? { ...turn, answer: turn.answer + delta }
+            : turn,
+        ),
+      );
+    },
+    [],
+  );
+
   // Obtains fresh state from the controller in this content script's own tab.
   const refreshPageState = useCallback(async (): Promise<void> => {
     try {
@@ -707,33 +800,33 @@ export function App({ initialOpen }: AppProps) {
       applyPageState(nextState);
     } catch (refreshError) {
       applyPageState(EMPTY_PAGE_STATE);
-      setPageError(formatError(locale, refreshError));
+      const error = formatError(locale, refreshError);
+      setPageError(error);
+      notify.error(error);
     }
   }, [applyPageState, locale]);
 
-  // Loads local settings, workflows, and page-task history before rendering.
-  useEffect(() => {
+  const initializePanel = useCallback(async (): Promise<void> => {
     const uiLanguage = browser.i18n.getUILanguage();
     const initialLocale = uiLanguage.toLowerCase().startsWith("zh")
       ? "zh_CN"
       : "en";
-    void Promise.all([
-      loadSettings(uiLanguage),
-      loadPageWorkflows(),
-      loadPageAgentHistory(),
-    ])
-      .then(([loadedSettings, loadedWorkflows, loadedHistory]) => {
-        setSettings(loadedSettings);
-        setWorkflows(loadedWorkflows);
-        setExecutionHistory(loadedHistory);
-        if (!loadedSettings.enabled || !loadedSettings.provider) {
-          setView("settings");
-        }
-      })
-      .catch((loadError: unknown) => {
-        setInitializationError(formatError(initialLocale, loadError));
-      });
+    try {
+      const [loadedSettings, loadedHistory, loadedWorkflows] = await Promise.all([
+        loadSettings(uiLanguage), loadPageAgentHistory(), loadPageWorkflows(),
+      ]);
+      setSettings(loadedSettings);
+      setExecutionHistory(loadedHistory);
+      setWorkflows(loadedWorkflows);
+      setInitializationError(undefined);
+    } catch (loadError) {
+      const error = formatError(initialLocale, loadError);
+      setInitializationError(error);
+      notify.error(error);
+    }
   }, []);
+
+  useEffect(() => { void initializePanel(); }, [initializePanel]);
 
   // Synchronizes state events emitted by this page's controller.
   useEffect(() => {
@@ -747,11 +840,31 @@ export function App({ initialOpen }: AppProps) {
 
     const handlePanelEvent = (message: PanelEvent): void => {
       if (message.target !== "panel") return;
+      if (message.type === "toggle-panel") {
+        if (pageSelecting.current) {
+          setPanelOpen(true);
+          void runPageCommand({ type: "cancel-selection" });
+          return;
+        }
+        setPanelOpen((open) => (open && pendingRequest.current ? open : !open));
+        return;
+      }
       if (message.type === "page-state-changed") {
         applyPageState(message.state);
         return;
       }
-      if (message.requestId === activePageAgentRequestId.current) {
+      if (message.type === "chat-delta") {
+        applyChatDelta(message.requestId, message.delta);
+        return;
+      }
+      if (message.type === "chat-context" && message.requestId === activeChatRequestId.current) {
+        setChatTurns((turns) => turns.map((turn) => turn.id === message.requestId ? { ...turn, snapshot: message.snapshot } : turn));
+        return;
+      }
+      if (
+        message.type === "page-agent-progress" &&
+        message.requestId === activePageAgentRequestId.current
+      ) {
         applyPageAgentProgress(message.progress);
       }
     };
@@ -760,46 +873,41 @@ export function App({ initialOpen }: AppProps) {
     return () => {
       browser.runtime.onMessage.removeListener(handlePanelEvent);
     };
-  }, [applyPageAgentProgress, applyPageState, refreshPageState, settings]);
+  }, [
+    applyChatDelta,
+    applyPageAgentProgress,
+    applyPageState,
+    refreshPageState,
+    settings,
+  ]);
 
-  // Synchronizes settings and toolbar-driven visibility across open tabs.
+  // Synchronizes persisted settings, workflows, and history for this panel.
   useEffect(() => {
     const handleStorageChange = (
       changes: Record<string, Browser.storage.StorageChange>,
       areaName: Browser.storage.AreaName,
     ): void => {
-      if (areaName === "session") {
-        const change = changes[PANEL_VISIBILITY_STORAGE_KEY];
-        if (!change) return;
-        if (typeof change.newValue !== "boolean") {
-          setError(t(locale, "panelStateInvalid"));
-          return;
-        }
-        setPanelOpen(change.newValue);
-        return;
-      }
       if (areaName === "local" && changes[SETTINGS_STORAGE_KEY]) {
         void loadSettings(browser.i18n.getUILanguage()).then((nextSettings) => {
           setSettings(nextSettings);
           if (!nextSettings.enabled) {
-            setView("settings");
             applyPageState(EMPTY_PAGE_STATE);
             setPageError(undefined);
           }
-        });
-      }
-      if (areaName === "local" && changes[PAGE_WORKFLOWS_STORAGE_KEY]) {
-        void loadPageWorkflows()
-          .then(setWorkflows)
-          .catch((workflowError: unknown) => {
-            setError(formatError(locale, workflowError));
-          });
+        }).catch((settingsError: unknown) => notify.error(formatError(locale, settingsError)));
       }
       if (areaName === "local" && changes[PAGE_AGENT_HISTORY_STORAGE_KEY]) {
         void loadPageAgentHistory()
           .then(setExecutionHistory)
           .catch((historyError: unknown) => {
-            setError(formatError(locale, historyError));
+            notify.error(formatError(locale, historyError));
+          });
+      }
+      if (areaName === "local" && changes[PAGE_WORKFLOWS_STORAGE_KEY]) {
+        void loadPageWorkflows()
+          .then(setWorkflows)
+          .catch((workflowError: unknown) => {
+            notify.error(formatError(locale, workflowError));
           });
       }
     };
@@ -807,10 +915,6 @@ export function App({ initialOpen }: AppProps) {
     return () => browser.storage.onChanged.removeListener(handleStorageChange);
   }, [applyPageState, locale]);
 
-  // Clears the outstanding notification timer when the panel is destroyed.
-  useEffect(() => {
-    return () => window.clearTimeout(toastTimer.current);
-  }, []);
 
   // Returns keyboard focus to the task immediately after inserting an element reference.
   useEffect(() => {
@@ -821,19 +925,9 @@ export function App({ initialOpen }: AppProps) {
     pageTaskCaret.current = undefined;
   }, [pageTask]);
 
-  // Repositions dragged surfaces after a viewport resize so they remain reachable.
+  // Keeps the dragged or resized panel reachable after a viewport resize.
   useEffect(() => {
     const handleResize = (): void => {
-      setLauncherPosition((current) => {
-        if (!current || !launcherRef.current) return current;
-        const rect = launcherRef.current.getBoundingClientRect();
-        return constrainToViewport(
-          current.left,
-          current.top,
-          rect.width,
-          rect.height,
-        );
-      });
       const panel = panelRef.current;
       if (panel) {
         const rect = panel.getBoundingClientRect();
@@ -869,72 +963,12 @@ export function App({ initialOpen }: AppProps) {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Starts launcher dragging from its rendered viewport position.
-  function handleLauncherPointerDown(
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ): void {
-    if (event.button !== 0 || !event.isPrimary) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    launcherDragSession.current = {
-      pointerId: event.pointerId,
-      startPointerX: event.clientX,
-      startPointerY: event.clientY,
-      startLeft: rect.left,
-      startTop: rect.top,
-      width: rect.width,
-      height: rect.height,
-      moved: false,
-    };
-    suppressLauncherClick.current = false;
-    setLauncherDragging(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  }
-
-  // Moves the launcher after the pointer clears the click-intent threshold.
-  function handleLauncherPointerMove(
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ): void {
-    const drag = launcherDragSession.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const offsetX = event.clientX - drag.startPointerX;
-    const offsetY = event.clientY - drag.startPointerY;
-    if (!drag.moved && Math.hypot(offsetX, offsetY) < DRAG_START_DISTANCE) {
-      return;
-    }
-
-    drag.moved = true;
-    setLauncherPosition(
-      constrainToViewport(
-        drag.startLeft + offsetX,
-        drag.startTop + offsetY,
-        drag.width,
-        drag.height,
-      ),
-    );
-    event.preventDefault();
-  }
-
-  // Ends launcher dragging and prevents its pointer-up click from toggling the panel.
-  function handleLauncherPointerEnd(
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ): void {
-    const drag = launcherDragSession.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    suppressLauncherClick.current = event.type === "pointerup" && drag.moved;
-    launcherDragSession.current = undefined;
-    setLauncherDragging(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
   // Starts panel dragging only from non-interactive parts of its header.
   function handlePanelPointerDown(event: ReactPointerEvent<HTMLElement>): void {
     if (
       event.button !== 0 ||
       !event.isPrimary ||
-      (event.target as Element).closest("button")
+      (event.target as Element).closest("button, input, textarea, select, summary, a, pre")
     ) {
       return;
     }
@@ -1152,7 +1186,7 @@ export function App({ initialOpen }: AppProps) {
     command: PageStateCommand,
     successKey?: MessageKey,
   ): Promise<PageState | undefined> {
-    setError(undefined);
+
     try {
       const nextState = await sendBackgroundRequest<PageState>({
         target: "background",
@@ -1161,10 +1195,10 @@ export function App({ initialOpen }: AppProps) {
       });
       setPageError(undefined);
       applyPageState(nextState);
-      if (successKey) showToast(t(locale, successKey));
+      if (successKey) notify.success(t(locale, successKey));
       return nextState;
     } catch (commandError) {
-      setError(formatError(locale, commandError));
+      notify.error(formatError(locale, commandError));
       return undefined;
     }
   }
@@ -1187,7 +1221,7 @@ export function App({ initialOpen }: AppProps) {
 
   // Copies fresh rendered text rather than relying on an earlier selection preview.
   async function handleCopyText(): Promise<void> {
-    setError(undefined);
+
     try {
       const state = await runPageCommand({ type: "get-page-state" });
       if (!state) return;
@@ -1195,20 +1229,20 @@ export function App({ initialOpen }: AppProps) {
         ? state.selection.text || state.selection.accessibleName
         : "";
       if (!content) {
-        setError(t(locale, "selectionTextRequired"));
+        notify.error(t(locale, "selectionTextRequired"));
         return;
       }
-      await navigator.clipboard.writeText(content);
-      showToast(t(locale, "copied"));
+      await copyText(content);
+      notify.success(t(locale, "copied"));
     } catch (clipboardError) {
-      setError(formatError(locale, clipboardError));
+      notify.error(formatError(locale, clipboardError));
     }
   }
 
   // Sends one general or selection-scoped request to the configured model.
   async function runAi(request: RunAiRequest): Promise<void> {
     const requestId = crypto.randomUUID();
-    setError(undefined);
+
     setResult(undefined);
     setPageAgentRun(undefined);
     setPending({ requestId, action: request.action });
@@ -1231,10 +1265,16 @@ export function App({ initialOpen }: AppProps) {
         selectionRevision: execution.selectionRevision,
       });
     } catch (aiError) {
-      setError(formatError(locale, aiError));
+      notify.error(formatError(locale, aiError));
     } finally {
       setPending(undefined);
     }
+  }
+
+  function handleToolPromptSubmit(): void {
+    const prompt = toolPrompt.trim();
+    if (toolPromptDisabled || !prompt) return;
+    void runAi({ action: "custom", prompt });
   }
 
   // Aborts the exact in-flight model request represented by the progress row.
@@ -1247,7 +1287,7 @@ export function App({ initialOpen }: AppProps) {
         requestId: pending.requestId,
       });
     } catch (cancelError) {
-      setError(formatError(locale, cancelError));
+      notify.error(formatError(locale, cancelError));
     }
   }
 
@@ -1255,10 +1295,10 @@ export function App({ initialOpen }: AppProps) {
   async function handlePageAgentAnswer(answer: string): Promise<boolean> {
     const requestId = activePageAgentRequestId.current;
     if (!requestId) {
-      setError(t(locale, "requestUnavailable"));
+      notify.error(t(locale, "requestUnavailable"));
       return false;
     }
-    setError(undefined);
+
     try {
       await sendBackgroundRequest<null>({
         target: "background",
@@ -1268,151 +1308,400 @@ export function App({ initialOpen }: AppProps) {
       });
       return true;
     } catch (answerError) {
-      setError(formatError(locale, answerError));
+      notify.error(formatError(locale, answerError));
       return false;
     }
   }
 
-  // Sends the custom prompt only when it contains an explicit user question.
-  function handleCustomSubmit(): void {
-    if (!customPrompt.trim()) {
-      setError(t(locale, "customPromptRequired"));
-      return;
+  async function handleReadPage(): Promise<void> {
+    setReadingLoading(true);
+
+    setReadingSnapshot(null);
+    setReadingBlockIds([]);
+    try {
+      const snapshot = await sendBackgroundRequest<PageReadingSnapshot>({ target: "background", type: "reading-command", command: { type: "read-page" } });
+      setReadingSnapshot(snapshot);
+      setReadingBlockIds(snapshot.blocks.map((block) => block.id));
+    } catch (readError) {
+      notify.error(formatError(locale, readError));
+    } finally {
+      setReadingLoading(false);
     }
-    void runAi({ action: "custom", prompt: customPrompt.trim() });
   }
 
-  // Opens the page-task view and executes the exact custom input there.
-  async function handleCustomPageTask(): Promise<void> {
-    const prompt = customPrompt.trim();
+  async function handleLocateCitation(citation: PageCitation): Promise<boolean> {
+    if (citation.documentId) return true;
+    try {
+      await sendBackgroundRequest<null>({ target: "background", type: "reading-command", command: { type: citation.timeSeconds === undefined ? "locate-citation" : "locate-video-citation", snapshotId: citation.snapshotId, blockId: citation.blockId } });
+      return true;
+    } catch (locateError) {
+      notify.error(formatError(locale, locateError));
+      return false;
+    }
+  }
+
+  async function handleReadVideo(): Promise<void> {
+    setReadingLoading(true);
+
+    setVideoSnapshot(null);
+    setVideoBlockIds([]);
+    try {
+      const snapshot = await sendBackgroundRequest<PageReadingSnapshot>({ target: "background", type: "reading-command", command: { type: "read-video" } });
+      setVideoSnapshot(snapshot);
+      setVideoBlockIds(snapshot.blocks.map((block) => block.id));
+      setAttachmentExpanded(true);
+    } catch (failure) { notify.error(formatError(locale, failure)); }
+    finally { setReadingLoading(false); }
+  }
+
+  async function handleAddContextElement(): Promise<void> {
+    setReadingLoading(true);
+
+    try {
+      const page = await sendBackgroundRequest<PageReadingSnapshot>({ target: "background", type: "reading-command", command: { type: "read-selected-element" } });
+      setContextElements((pages) => [...pages, page]);
+      setChatContext("elements");
+      setAttachmentExpanded(true);
+    } catch (readError) {
+      notify.error(formatError(locale, readError));
+    } finally {
+      setReadingLoading(false);
+    }
+  }
+
+  async function handleSelectContextElement(): Promise<void> {
+    if (chatContext !== "elements") setContextElements([]);
+    contextSelectionRevision.current = pageState.selectionRevision;
+    const state = await runPageCommand({ type: "start-selection" });
+    if (!state) contextSelectionRevision.current = null;
+  }
+
+  async function handleTextFile(file: File): Promise<void> {
+    setReadingLoading(true);
+
+    setFileSnapshot(null);
+    setFileBlockIds([]);
+    try {
+      const snapshot = await readTextFile(file);
+      setFileSnapshot(snapshot);
+      setFileBlockIds(snapshot.blocks.map((block) => block.id));
+      setChatContext("file");
+      setAttachmentExpanded(true);
+    } catch (failure) { notify.error(formatError(locale, failure)); }
+    finally { setReadingLoading(false); }
+  }
+
+  async function handleTranslatePage(language: string, terms: TranslationTerm[]): Promise<void> {
+    if (pending || readingLoading || !selectedReadingSnapshot) return;
+    const source = selectedReadingSnapshot;
+    const requestId = crypto.randomUUID();
+    setPending({ requestId, action: "translate-page" });
+    setTranslationPreview(null);
+
+    try {
+      const result = await sendBackgroundRequest<PageTranslationResult>({ target: "background", type: "translate-page", requestId, request: {
+        selection: { snapshotId: source.id, blockIds: source.blocks.map((block) => block.id) },
+        language, terms,
+      } });
+      setTranslationPreview({ source, result });
+    } catch (failure) { notify.error(formatError(locale, failure)); }
+    finally { setPending(undefined); }
+  }
+
+  async function handleTranslationCommand(command: PageTranslationCommand): Promise<void> {
+    setReadingLoading(true);
+
+    try {
+      await sendBackgroundRequest<null>({ target: "background", type: "translation-command", command });
+      if (command.type === "restore-translation") { setTranslationMode(null); setTranslationPreview(null); }
+      else setTranslationMode(command.type === "apply-translation" ? "bilingual" : command.mode);
+    } catch (failure) { notify.error(formatError(locale, failure)); }
+    finally { setReadingLoading(false); }
+  }
+
+  // Sends one chat turn with the explicitly selected page-context mode.
+  async function handleChatSubmit(pagePrompt?: string): Promise<void> {
+    if (pending || readingLoading) return;
+    const prompt = (pagePrompt ?? customPrompt).trim();
     if (!prompt) {
-      setError(t(locale, "pageTaskRequired"));
+      notify.error(t(locale, "customPromptRequired"));
       return;
     }
-    let task = prompt;
-    if (selection) {
-      const nextState = await runPageCommand({
-        type: "add-selection-to-page-task",
-      });
-      if (!nextState?.selection) return;
-      task = `${createPageTaskElementReference(locale, nextState.selection)} ${prompt}`;
-    }
-    setPageTask(task);
-    setMainTab("operate");
-    setOperateTab("task");
-    await runPageAgent(task);
-  }
-
-  // Opens the name field for a reusable copy of the current page task.
-  function handleCreateWorkflow(): void {
-    if (!pageTask.trim()) {
-      setError(t(locale, "pageTaskRequired"));
+    if (editingTurnIndex !== null) {
+      const turn = chatTurns[editingTurnIndex];
+      if (turn) await sendConversationTurn(prompt, turn.snapshot, turn.webSearch === true, editingTurnIndex, true);
       return;
     }
-    setError(undefined);
-    setWorkflowEditor({ mode: "create", name: "" });
-  }
-
-  // Loads a saved workflow into the same editor used for page-task execution.
-  function handleEditWorkflow(workflow: SavedPageWorkflow): void {
-    setError(undefined);
-    setPageTask(workflow.task);
-    setWorkflowEditor({
-      mode: "edit",
-      id: workflow.id,
-      name: workflow.name,
-    });
-  }
-
-  // Creates or updates one normalized workflow in local extension storage.
-  async function handleSaveWorkflow(): Promise<void> {
-    if (!workflowEditor) return;
-    const name = workflowEditor.name.trim();
-    const task = pageTask.trim();
-    if (!name) {
-      setError(t(locale, "workflowNameRequired"));
+    const source = chatContext === "video" ? videoSnapshot : readingSnapshot;
+    const selectedBlocks = new Set(chatContext === "video" ? videoBlockIds : readingBlockIds);
+    const selectedFileBlocks = new Set(fileBlockIds);
+    const reading = source && { ...source, blocks: source.blocks.filter((block) => selectedBlocks.has(block.id)) };
+    const file = fileSnapshot && { ...fileSnapshot, blocks: fileSnapshot.blocks.filter((block) => selectedFileBlocks.has(block.id)) };
+    if (chatContext === "file" && (!file || !file.blocks.length)) {
+      notify.error(t(locale, "fileContextRequired"));
       return;
     }
-    if (!task) {
-      setError(t(locale, "pageTaskRequired"));
+    if ((chatContext === "page" || chatContext === "video") && (!reading || !reading.blocks.length)) {
+      notify.error(t(locale, "pageReadingSelectionInvalid"));
       return;
     }
-
-    let nextWorkflows: SavedPageWorkflow[];
-    let toastKey: MessageKey;
-    if (workflowEditor.mode === "create") {
-      nextWorkflows = [{ id: crypto.randomUUID(), name, task }, ...workflows];
-      toastKey = "workflowSaved";
-    } else {
-      if (!workflows.some((workflow) => workflow.id === workflowEditor.id)) {
-        setError(t(locale, "workflowUnavailable"));
+    if (chatContext === "elements") {
+      if (!contextElements.length) {
+        notify.error(t(locale, "contextElementsRequired"));
         return;
       }
-      nextWorkflows = workflows.map((workflow) =>
-        workflow.id === workflowEditor.id
-          ? { ...workflow, name, task }
-          : workflow,
-      );
-      toastKey = "workflowUpdated";
     }
+    const snapshot: ChatContextSnapshot = (chatContext === "page" || chatContext === "video") && reading
+      ? { type: "page", page: reading }
+      : chatContext === "elements" ? { type: "elements", pages: contextElements }
+      : chatContext === "file" && file ? { type: "file", file }
+      : { type: "none" };
+    await sendConversationTurn(prompt, snapshot, webSearch, chatTurns.length, false);
+  }
 
-    setError(undefined);
+  async function sendConversationTurn(prompt: string, snapshot: ChatContextSnapshot, search: boolean, index: number, replay: boolean): Promise<void> {
+    if (pending || readingLoading) return;
+    const requestId = crypto.randomUUID();
+    const precedingTurns = chatTurns.slice(0, index);
+    search = search && snapshot.type !== "image" && !precedingTurns.some((turn) => turn.status === "complete" && turn.snapshot.type === "image");
+    const common = { prompt, includeHistory: true, webSearch: search, history: getConversationHistory(precedingTurns) };
+    const chatRequest: BackgroundRequest = replay || snapshot.type === "image"
+      ? { target: "background", type: "replay-chat", requestId, request: { ...common, snapshot } }
+      : { target: "background", type: "run-chat", requestId, request: { ...common, context: snapshot.type === "page" && snapshot.page.videoId ? "video" : snapshot.type,
+      ...(snapshot.type === "page" ? { pageSelection: { snapshotId: snapshot.page.id, blockIds: snapshot.page.blocks.map((block) => block.id) } } : {}),
+      ...(snapshot.type === "selection" ? { selectionRevision: selectionRevision.current } : {}),
+      ...(snapshot.type === "elements" ? { elementSelections: snapshot.pages.map((page) => ({ snapshotId: page.id, blockIds: page.blocks.map((block) => block.id) })) } : {}),
+      ...(snapshot.type === "file" ? { file: snapshot.file } : {}),
+    } };
+    activeChatRequestId.current = requestId;
+
+    setResult(undefined);
+    setPageAgentRun(undefined);
+    setCustomPrompt("");
+    setEditingTurnIndex(null);
+    setChatContext("none");
+    setConversationLibraryOpen(false);
+    setAttachmentExpanded(false);
+    setChatTurns([...precedingTurns, { id: requestId, prompt, snapshot, includeHistory: true, webSearch: search, answer: "", status: "streaming" }]);
+    setContextElements([]);
+    setPending({ requestId, action: "chat" });
+
+    try {
+      const execution = await sendBackgroundRequest<ChatExecutionResult>(chatRequest);
+      if (
+        execution.selectionRevision !== null &&
+        execution.selectionRevision !== selectionRevision.current
+      ) {
+        throw new Error("requestContextChanged");
+      }
+      setChatTurns((turns) =>
+        turns.map((turn) =>
+          turn.id === requestId
+            ? {
+                ...turn,
+                answer: execution.content,
+                status: "complete",
+              }
+            : turn,
+        ),
+      );
+    } catch (chatError) {
+      const cancelled =
+        chatError instanceof Error && chatError.message === "requestCancelled";
+      setChatTurns((turns) =>
+        turns.map((turn) =>
+          turn.id === requestId
+            ? {
+                ...turn,
+                status: cancelled ? "cancelled" : "failed",
+              }
+            : turn,
+        ),
+      );
+      setCustomPrompt(prompt);
+      notify.error(formatError(locale, chatError));
+    } finally {
+      if (activeChatRequestId.current === requestId) {
+        activeChatRequestId.current = undefined;
+      }
+      setPending(undefined);
+    }
+  }
+
+  // Removes only the in-memory conversation from the current page session.
+  async function handleClearChat(): Promise<void> {
+    if (pending || readingLoading) return;
+    try {
+      if (translationMode) await sendBackgroundRequest<null>({ target: "background", type: "translation-command", command: { type: "restore-translation" } });
+      await sendBackgroundRequest<null>({ target: "background", type: "reading-command", command: { type: "clear-reading" } });
+    } catch (clearError) {
+      notify.error(formatError(locale, clearError));
+      return;
+    }
+    setChatTurns([]);
+    setSavedConversation(null);
+    setEditingTurnIndex(null);
+    setCustomPrompt("");
+    setChatContext("none");
+    setConversationLibraryOpen(false);
+    setAttachmentExpanded(false);
+    setReadingSnapshot(null);
+    setReadingBlockIds([]);
+    setContextElements([]);
+    setVideoSnapshot(null);
+    setVideoBlockIds([]);
+    setFileSnapshot(null);
+    setFileBlockIds([]);
+    setTranslationMode(null);
+    setTranslationPreview(null);
+
+  }
+
+  function handleLoadConversation(record: SavedConversation): void {
+    if (pending || readingLoading) return;
+    setChatTurns(record.turns);
+    setSavedConversation(record);
+    setEditingTurnIndex(null);
+    setCustomPrompt("");
+    setChatContext("none");
+    setConversationLibraryOpen(false);
+
+  }
+
+  function handleEditTurn(index: number): void {
+    const turn = chatTurns[index];
+    if (!turn || pending) return;
+    setEditingTurnIndex(index);
+    setCustomPrompt(turn.prompt);
+  }
+
+  // Copies one completed or interrupted assistant message.
+  async function handleCopyChatMessage(content: string): Promise<void> {
+
+    try {
+      await copyText(content);
+      notify.success(t(locale, "copied"));
+    } catch (clipboardError) {
+      notify.error(formatError(locale, clipboardError));
+    }
+  }
+
+  function handleEditWorkflow(workflow: SavedPageWorkflow): void {
+    setPageTask(workflow.task);
+    setTaskSites(workflow.allowedOrigins.join("\n"));
+    setParameterTask(null);
+    setWorkflowEditor({ mode: "edit", id: workflow.id, name: workflow.name });
+  }
+
+  async function handleSaveWorkflow(): Promise<void> {
+    if (!workflowEditor || workflowMutationPending || pending) return;
+    const name = workflowEditor.name.trim();
+    const task = pageTask.trim();
+    if (!name || !task) {
+      notify.error(t(locale, !name ? "workflowNameRequired" : "pageTaskRequired"));
+      return;
+    }
     setWorkflowMutationPending(true);
     try {
-      await savePageWorkflows(nextWorkflows);
-      setWorkflows(nextWorkflows);
+      const allowedOrigins = parseSiteInput(taskSites);
+      const current = await loadPageWorkflows();
+      if (workflowEditor.mode === "edit" && !current.some((item) => item.id === workflowEditor.id)) {
+        throw new Error("workflowUnavailable");
+      }
+      const next = workflowEditor.mode === "create"
+        ? [{ id: crypto.randomUUID(), name, task, allowedOrigins }, ...current]
+        : current.map((item) => item.id === workflowEditor.id ? { ...item, name, task, allowedOrigins } : item);
+      await savePageWorkflows(next);
+      setWorkflows(next);
       setWorkflowEditor(undefined);
-      showToast(t(locale, toastKey));
+      notify.success(t(locale, workflowEditor.mode === "create" ? "workflowSaved" : "workflowUpdated"));
     } catch (workflowError) {
-      setError(formatError(locale, workflowError));
+      notify.error(formatError(locale, workflowError));
     } finally {
       setWorkflowMutationPending(false);
     }
   }
 
-  // Removes one explicitly confirmed workflow from local extension storage.
-  async function handleDeleteWorkflow(
-    workflow: SavedPageWorkflow,
-  ): Promise<void> {
-    if (!window.confirm(t(locale, "confirmDeleteWorkflow"))) return;
-
-    const nextWorkflows = workflows.filter((item) => item.id !== workflow.id);
-    if (nextWorkflows.length === workflows.length) {
-      setError(t(locale, "workflowUnavailable"));
-      return;
-    }
-
-    setError(undefined);
+  async function handleDeleteWorkflow(workflow: SavedPageWorkflow): Promise<void> {
+    if (workflowMutationPending || pending || !window.confirm(t(locale, "confirmDeleteWorkflow"))) return;
     setWorkflowMutationPending(true);
     try {
-      await savePageWorkflows(nextWorkflows);
-      setWorkflows(nextWorkflows);
-      if (
-        workflowEditor?.mode === "edit" &&
-        workflowEditor.id === workflow.id
-      ) {
+      const current = await loadPageWorkflows();
+      const next = current.filter((item) => item.id !== workflow.id);
+      if (next.length === current.length) throw new Error("workflowUnavailable");
+      await savePageWorkflows(next);
+      setWorkflows(next);
+      if (workflowEditor?.mode === "edit" && workflowEditor.id === workflow.id) {
         setWorkflowEditor(undefined);
       }
-      showToast(t(locale, "workflowDeleted"));
+      notify.success(t(locale, "workflowDeleted"));
     } catch (workflowError) {
-      setError(formatError(locale, workflowError));
+      notify.error(formatError(locale, workflowError));
     } finally {
       setWorkflowMutationPending(false);
     }
+  }
+
+  async function handleImportWorkflows(file: File): Promise<void> {
+    if (workflowMutationPending || pending) return;
+    setWorkflowMutationPending(true);
+    try {
+      if (file.size > 2_000_000) throw new Error("workflowImportTooLarge");
+      const imported = importPageWorkflows(await file.text());
+      const next = [...imported, ...await loadPageWorkflows()];
+      await savePageWorkflows(next);
+      setWorkflows(next);
+      notify.success(t(locale, "workflowSaved"));
+    } catch (workflowError) {
+      notify.error(formatError(locale, workflowError));
+    } finally {
+      setWorkflowMutationPending(false);
+    }
+  }
+
+  function handleExportWorkflows(): void {
+    try {
+      downloadText(exportPageWorkflows(workflows), "hyperpage-workflows.json", "application/json");
+    } catch (workflowError) {
+      notify.error(formatError(locale, workflowError));
+    }
+  }
+
+  function handleRunWorkflow(workflow: SavedPageWorkflow): void {
+    setWorkflowEditor(undefined);
+    setPageTask(workflow.task);
+    const sites = workflow.allowedOrigins.join("\n");
+    setTaskSites(sites);
+    setParameterTask(null);
+    void preparePageTask(workflow.task, sites);
+  }
+
+  async function preparePageTask(taskInput: string, sitesInput: string): Promise<void> {
+
+    try {
+      const allowedOrigins = parseSiteInput(sitesInput);
+      assertSiteAllowed(window.location.href, allowedOrigins);
+      if (getTemplateVariables(taskInput).length) {
+        setParameterTask({ template: taskInput, allowedOrigins });
+        return;
+      }
+      setParameterTask(null);
+      await runPageAgent(taskInput, allowedOrigins);
+    } catch (failure) { notify.error(formatError(locale, failure)); }
   }
 
   // Runs one natural-language task against the current page's indexed DOM.
-  async function runPageAgent(taskInput: string): Promise<void> {
+  async function runPageAgent(taskInput: string, allowedOrigins: string[]): Promise<void> {
     const task = taskInput.trim();
     if (!task) {
-      setError(t(locale, "pageTaskRequired"));
+      notify.error(t(locale, "pageTaskRequired"));
       return;
     }
 
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
     let executionRecord: PageAgentExecutionRecord | undefined;
-    setError(undefined);
+
     setResult(undefined);
     completedPageAgentSteps.current = [];
     setPageAgentRun({
@@ -1427,6 +1716,7 @@ export function App({ initialOpen }: AppProps) {
         type: "run-page-agent",
         requestId,
         task,
+        ...(allowedOrigins.length ? { allowedOrigins } : {}),
       });
       setResult({
         action: "operate-page",
@@ -1455,15 +1745,8 @@ export function App({ initialOpen }: AppProps) {
         agentError instanceof Error && agentError.message === "requestCancelled"
           ? "cancelled"
           : "failed";
-      setPageAgentRun((currentRun) => ({
-        current: {
-          phase: "failed",
-          stepIndex: currentRun?.current.stepIndex ?? 0,
-          message,
-        },
-        completedSteps: currentRun?.completedSteps ?? [],
-      }));
-      setResult({ action: "operate-page", content: message, status });
+      setPageAgentRun(undefined);
+      notify.error(message);
       executionRecord = {
         id: crypto.randomUUID(),
         task,
@@ -1490,19 +1773,12 @@ export function App({ initialOpen }: AppProps) {
             await addPageAgentExecutionRecord(executionRecord),
           );
         } catch (historyError) {
-          setError(formatError(locale, historyError));
+          notify.error(formatError(locale, historyError));
         } finally {
           setHistoryMutationPending(false);
         }
       }
     }
-  }
-
-  // Runs a saved task in one click while making its description visible.
-  function handleRunWorkflow(workflow: SavedPageWorkflow): void {
-    setWorkflowEditor(undefined);
-    setPageTask(workflow.task);
-    void runPageAgent(workflow.task);
   }
 
   // Removes one confirmed page-task record from local extension storage.
@@ -1514,14 +1790,13 @@ export function App({ initialOpen }: AppProps) {
       (item) => item.id !== record.id,
     );
 
-    setError(undefined);
     setHistoryMutationPending(true);
     try {
       await savePageAgentHistory(nextHistory);
       setExecutionHistory(nextHistory);
-      showToast(t(locale, "executionRecordDeleted"));
+      notify.success(t(locale, "executionRecordDeleted"));
     } catch (historyError) {
-      setError(formatError(locale, historyError));
+      notify.error(formatError(locale, historyError));
     } finally {
       setHistoryMutationPending(false);
     }
@@ -1531,14 +1806,13 @@ export function App({ initialOpen }: AppProps) {
   async function handleClearExecutionHistory(): Promise<void> {
     if (!window.confirm(t(locale, "confirmClearExecutionHistory"))) return;
 
-    setError(undefined);
     setHistoryMutationPending(true);
     try {
       await savePageAgentHistory([]);
       setExecutionHistory([]);
-      showToast(t(locale, "executionHistoryCleared"));
+      notify.success(t(locale, "executionHistoryCleared"));
     } catch (historyError) {
-      setError(formatError(locale, historyError));
+      notify.error(formatError(locale, historyError));
     } finally {
       setHistoryMutationPending(false);
     }
@@ -1547,101 +1821,47 @@ export function App({ initialOpen }: AppProps) {
   // Copies the current model result as plain Markdown source text.
   async function handleCopyResult(): Promise<void> {
     if (!result) return;
-    setError(undefined);
+
     try {
-      await navigator.clipboard.writeText(result.content);
-      showToast(t(locale, "copied"));
+      await copyText(result.content);
+      notify.success(t(locale, "copied"));
     } catch (clipboardError) {
-      setError(formatError(locale, clipboardError));
+      notify.error(formatError(locale, clipboardError));
     }
   }
 
-  // Accepts newly persisted settings and returns to the main action surface.
-  function handleSettingsSaved(nextSettings: StoredSettings): void {
-    setSettings(nextSettings);
-    setView(nextSettings.enabled ? "main" : "settings");
-    showToast(t(nextSettings.locale, "settingsSaved"));
+  function continueResult(): void {
+    if (!result || pending) return;
+    setChatTurns((turns) => [...turns, { id: crypto.randomUUID(), prompt: t(locale, getActionLabelKey(result.action)), answer: result.content, snapshot: { type: "none" }, includeHistory: false, status: "complete" }]);
+    setChatContext("none");
+    setEditingTurnIndex(null);
+    setCustomPrompt("");
+    setMainTab("chat");
+    customPromptInputRef.current?.focus();
   }
 
-  // Persists the launcher's expanded state so the toolbar and every tab agree.
-  async function handlePanelOpenChange(open: boolean): Promise<void> {
-    if (!open && pending) return;
-    setError(undefined);
+  async function openSettings(): Promise<void> {
     try {
-      await sendBackgroundRequest<null>({
-        target: "background",
-        type: "set-panel-visibility",
-        visible: open,
-      });
-      setPanelOpen(open);
-    } catch (visibilityError) {
-      setError(formatError(locale, visibilityError));
+      await sendBackgroundRequest<null>({ target: "background", type: "open-settings" });
+    } catch (failure) {
+      const error = formatError(locale, failure);
+      if (!settings) setInitializationError(error);
+      notify.error(error);
     }
   }
 
-  // Cancels element picking from the persistent launcher or toggles the panel.
-  function handleLauncherClick(): void {
-    if (suppressLauncherClick.current) {
-      suppressLauncherClick.current = false;
-      return;
-    }
-    if (pageState.selecting) {
-      void runPageCommand({ type: "cancel-selection" });
-      return;
-    }
-    if (panelOpen && pending) return;
-    void handlePanelOpenChange(!panelOpen);
+  // Changes only this page's panel state after the page has been activated.
+  function handlePanelOpenChange(open: boolean): void {
+    if (!open && pending) return;
+    setPanelOpen(open);
   }
 
   const panelVisible = panelOpen && !pageState.selecting;
-  const launcherLabel = t(
-    locale,
-    pageState.selecting
-      ? "cancelSelection"
-      : panelVisible
-        ? "closePanel"
-        : "openPanel",
-  );
-  const launcher = (
-    <IconTooltip label={launcherLabel}>
-      <Button
-        type="button"
-        variant="ghost"
-        aria-label={launcherLabel}
-        aria-controls="hyperpage-tool-panel"
-        aria-expanded={panelVisible}
-        disabled={Boolean(pending)}
-        data-dragging={launcherDragging || undefined}
-        ref={launcherRef}
-        style={
-          launcherPosition
-            ? {
-                left: launcherPosition.left,
-                top: launcherPosition.top,
-                right: "auto",
-                bottom: "auto",
-              }
-            : undefined
-        }
-        className="hp-launcher pointer-events-auto fixed right-4 bottom-4 size-[58px] rounded-2xl bg-white p-0 shadow-xl hover:bg-white aria-expanded:bg-white dark:bg-white dark:hover:bg-white dark:aria-expanded:bg-white"
-        onClick={handleLauncherClick}
-        onPointerDown={handleLauncherPointerDown}
-        onPointerMove={handleLauncherPointerMove}
-        onPointerUp={handleLauncherPointerEnd}
-        onPointerCancel={handleLauncherPointerEnd}
-      >
-        <img
-          src={browser.runtime.getURL("/icon/48.png")}
-          alt=""
-          className="size-10"
-        />
-      </Button>
-    </IconTooltip>
-  );
 
   if (!settings) {
     return (
       <>
+        <Toaster closeLabel={t(locale, "close")} />
         {panelVisible && (
           <div
             id="hyperpage-tool-panel"
@@ -1657,23 +1877,24 @@ export function App({ initialOpen }: AppProps) {
                   }
                 : undefined
             }
-            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-[86px] flex min-h-24 w-[min(420px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
+            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-4 flex min-h-24 max-h-[calc(100dvh-32px)] w-[min(420px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
             onPointerDown={handlePanelPointerDown}
             onPointerMove={handlePanelPointerMove}
             onPointerUp={handlePanelPointerEnd}
             onPointerCancel={handlePanelPointerEnd}
           >
             {initializationError ? (
-              <Alert variant="destructive">
-                <CircleAlert />
-                <AlertDescription>{initializationError}</AlertDescription>
-              </Alert>
+              <div className="flex w-full flex-col gap-3 overflow-y-auto">
+                <Button onClick={openSettings}>
+                  <Settings data-icon="inline-start" />
+                  {t(locale, "openSettings")}
+                </Button>
+              </div>
             ) : (
               <Spinner className="size-5" />
             )}
           </div>
         )}
-        {launcher}
       </>
     );
   }
@@ -1681,11 +1902,11 @@ export function App({ initialOpen }: AppProps) {
   const hasText = Boolean(selection?.text);
   const visual = selection ? isVisualSelection(selection) : false;
   const canUseTextAi = Boolean(
-    selection && (hasText || (visual && provider?.supportsVision)),
+    selection && (hasText || (visual && supportsVision)),
   );
-  const canUseVision = Boolean(selection && provider?.supportsVision);
+  const canUseVision = Boolean(selection && supportsVision);
   const canAnalyzeImage = Boolean(
-    selection?.kind === "image" && provider?.supportsVision,
+    selection?.kind === "image" && supportsVision,
   );
   const selectionContent = selection
     ? selection.text || selection.accessibleName
@@ -1693,10 +1914,19 @@ export function App({ initialOpen }: AppProps) {
   const pageReady = settings.enabled && !pageError;
   const actionsDisabled = Boolean(
     pending ||
+      workflowMutationPending ||
       historyMutationPending ||
-      !provider ||
+      !hasProvider ||
       !pageReady,
   );
+  const toolPromptDisabled = actionsDisabled || Boolean(selection && !canUseTextAi);
+  const resultPending = pending?.action === "chat" || pending?.action === "translate-page" ? undefined : pending;
+  const feedbackAction = resultPending?.action ?? result?.action;
+  const feedbackTab = feedbackAction === "write"
+    ? "writing"
+    : feedbackAction === "operate-page" || pageAgentRun
+      ? "operate"
+      : "tools";
   const historyDateFormatter = new Intl.DateTimeFormat(
     locale === "zh_CN" ? "zh-CN" : "en",
     { dateStyle: "short", timeStyle: "short" },
@@ -1708,10 +1938,11 @@ export function App({ initialOpen }: AppProps) {
   );
   return (
     <>
-      {panelVisible && (
+        <Toaster closeLabel={t(locale, "close")} />
         <div
           id="hyperpage-tool-panel"
           ref={panelRef}
+          hidden={!panelVisible}
           data-dragging={panelDragging || undefined}
           data-resizing={panelResizing || panelHeightResizing || undefined}
           style={
@@ -1726,7 +1957,7 @@ export function App({ initialOpen }: AppProps) {
                 }
               : { width: panelWidth, height: panelHeight }
           }
-          className="hp-panel pointer-events-auto fixed right-4 bottom-[86px] flex flex-col overflow-hidden rounded-md border bg-background text-foreground"
+          className={cn("hp-panel pointer-events-auto fixed right-4 bottom-4 flex flex-col overflow-hidden rounded-md border bg-background text-foreground", !panelVisible && "hidden")}
         >
           <div
             className="group absolute top-2 bottom-2 left-0 z-10 w-2 cursor-ew-resize touch-none outline-none"
@@ -1779,62 +2010,20 @@ export function App({ initialOpen }: AppProps) {
             onPointerCancel={handlePanelPointerEnd}
           >
             <div className="flex h-12 items-center gap-2 px-3">
-              {view === "settings" ? (
-                <>
-                  <IconTooltip label={t(locale, "back")}>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label={t(locale, "back")}
-                      disabled={!settings.enabled}
-                      onClick={() => setView("main")}
-                    >
-                      <ArrowLeft />
-                    </Button>
-                  </IconTooltip>
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-                    {t(locale, "settings")}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <img
-                    src={browser.runtime.getURL("/icon/32.png")}
-                    alt=""
-                    className="size-7"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-                    HyperPage AI
-                  </span>
-                </>
-              )}
+              <img src={browser.runtime.getURL("/icon/32.png")} alt="" className="size-7" />
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold">HyperPage AI</span>
 
-              <Badge
-                variant={settings.enabled && provider ? "secondary" : "outline"}
-              >
-                {t(
-                  locale,
-                  !settings.enabled
-                    ? "extensionOff"
-                    : provider
-                      ? "configured"
-                      : "setupRequired",
-                )}
-              </Badge>
-
-              {view === "main" && (
-                <IconTooltip label={t(locale, "settings")}>
+              <IconTooltip label={t(locale, "settings")}>
                   <Button
                     size="icon-sm"
                     variant="ghost"
                     aria-label={t(locale, "settings")}
                     disabled={Boolean(pending)}
-                    onClick={() => setView("settings")}
+                    onClick={openSettings}
                   >
                     <Settings />
                   </Button>
-                </IconTooltip>
-              )}
+              </IconTooltip>
 
               <IconTooltip label={t(locale, "closePanel")}>
                 <Button
@@ -1842,7 +2031,7 @@ export function App({ initialOpen }: AppProps) {
                   variant="ghost"
                   aria-label={t(locale, "closePanel")}
                   disabled={Boolean(pending)}
-                  onClick={() => void handlePanelOpenChange(false)}
+                  onClick={() => handlePanelOpenChange(false)}
                 >
                   <X />
                 </Button>
@@ -1850,221 +2039,252 @@ export function App({ initialOpen }: AppProps) {
             </div>
           </header>
 
-          {view === "settings" ? (
-            <div className="min-h-0 flex-1 overflow-y-auto bg-muted/30">
-              <div className="hp-view-enter">
-                <SettingsView
-                  settings={settings}
-                  onSaved={handleSettingsSaved}
-                />
-              </div>
-            </div>
+          {!settings.enabled || !hasProvider ? (
+            <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
+              <Empty>
+                <EmptyHeader>
+                  <EmptyMedia variant="icon"><Settings /></EmptyMedia>
+                  <EmptyTitle>{t(locale, settings.enabled ? "setupRequired" : "extensionOff")}</EmptyTitle>
+                </EmptyHeader>
+                <Button onClick={openSettings}>
+                  <Settings data-icon="inline-start" />
+                  {t(locale, "openSettings")}
+                </Button>
+              </Empty>
+            </main>
           ) : (
-            <main className="hp-view-enter flex min-h-0 flex-1 flex-col bg-muted/30">
+            <main className="hp-view-enter flex min-h-0 flex-1 flex-col">
               <Tabs
                 value={mainTab}
-                onValueChange={setMainTab}
+                onValueChange={(value) => {
+                  setMainTab(value);
+                  if (value === "documents") setDocumentsOpened(true);
+                }}
                 className="min-h-0 flex-1 gap-0 overflow-hidden"
               >
                 <div
                   className="shrink-0 border-b bg-background p-2"
                   data-main-navigation
                 >
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="ai">
-                      <Sparkles data-icon="inline-start" />
-                      {t(locale, "aiTools")}
-                    </TabsTrigger>
-                    <TabsTrigger value="operate">
-                      <Bot data-icon="inline-start" />
-                      {t(locale, "operatePage")}
-                    </TabsTrigger>
+                  <TabsList className="grid w-full grid-cols-5">
+                    <TabsTrigger value="chat">{t(locale, "navChat")}</TabsTrigger>
+                    <TabsTrigger value="documents">{t(locale, "navDocuments")}</TabsTrigger>
+                    <TabsTrigger value="writing">{t(locale, "navWriting")}</TabsTrigger>
+                    <TabsTrigger value="tools">{t(locale, "navTools")}</TabsTrigger>
+                    <TabsTrigger value="operate">{t(locale, "navTasks")}</TabsTrigger>
                   </TabsList>
                 </div>
 
+                  <TabsContent value="documents" keepMounted className="min-h-0 data-[hidden]:hidden">
+                    {documentsOpened && <iframe
+                      title={t(locale, "documents")}
+                      src={browser.runtime.getURL("/documents.html")}
+                      className="h-full w-full border-0"
+                      allow="clipboard-write"
+                    />}
+                  </TabsContent>
+
                 <div
-                  className="grid min-h-0 flex-1 auto-rows-max content-start gap-3 overflow-y-auto p-3 pb-6"
+                  className={cn("min-h-0 flex-1", mainTab === "chat" ? "flex flex-col overflow-hidden" : "grid auto-rows-max content-start gap-3 overflow-y-auto p-3 pb-6", mainTab === "documents" && "hidden")}
                   data-panel-scroll-region
                 >
-                  {mainTab !== "operate" && (
-                      <Card size="sm" data-selected-element-summary>
-                        <CardHeader>
-                          <CardTitle>{t(locale, "selectedElement")}</CardTitle>
-                          <CardAction className="flex items-center gap-1">
-                            <Badge variant="outline">
-                              {selection
-                                ? selection.kind
-                                : t(locale, "noSelection")}
-                            </Badge>
-                            {selectionContent && (
-                              <>
-                                <IconTooltip label={t(locale, "copyText")}>
-                                  <Button
-                                    size="icon-xs"
-                                    variant="ghost"
-                                    aria-label={t(locale, "copyText")}
-                                    onClick={() => void handleCopyText()}
-                                  >
-                                    <Copy />
-                                  </Button>
-                                </IconTooltip>
-                                <IconTooltip
-                                  label={t(
+                  {(mainTab === "tools" || mainTab === "writing") && (
+                    <section className="flex flex-col gap-3 border-b pb-3" data-selected-element-summary>
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-sm font-medium">{t(locale, "selectedElement")}</h2>
+                        <div className="flex items-center gap-1">
+                          <Badge variant="outline">
+                            {selection
+                              ? selection.kind
+                              : t(locale, "noSelection")}
+                          </Badge>
+                          {selectionContent && (
+                            <>
+                              <IconTooltip label={t(locale, "copyText")}>
+                                <Button
+                                  size="icon-xs"
+                                  variant="ghost"
+                                  aria-label={t(locale, "copyText")}
+                                  onClick={() => void handleCopyText()}
+                                >
+                                  <Copy />
+                                </Button>
+                              </IconTooltip>
+                              <IconTooltip
+                                label={t(
+                                  locale,
+                                  selectionExpanded
+                                    ? "collapseSelection"
+                                    : "expandSelection",
+                                )}
+                              >
+                                <Button
+                                  size="icon-xs"
+                                  variant="ghost"
+                                  aria-label={t(
                                     locale,
                                     selectionExpanded
                                       ? "collapseSelection"
                                       : "expandSelection",
                                   )}
+                                  aria-controls="hyperpage-selection-content"
+                                  aria-expanded={selectionExpanded}
+                                  onClick={() =>
+                                    setSelectionExpanded(
+                                      (expanded) => !expanded,
+                                    )
+                                  }
                                 >
-                                  <Button
-                                    size="icon-xs"
-                                    variant="ghost"
-                                    aria-label={t(
-                                      locale,
-                                      selectionExpanded
-                                        ? "collapseSelection"
-                                        : "expandSelection",
-                                    )}
-                                    aria-controls="hyperpage-selection-content"
-                                    aria-expanded={selectionExpanded}
-                                    onClick={() =>
-                                      setSelectionExpanded(
-                                        (expanded) => !expanded,
-                                      )
-                                    }
-                                  >
-                                    {selectionExpanded ? (
-                                      <Minimize2 />
-                                    ) : (
-                                      <Maximize2 />
-                                    )}
-                                  </Button>
-                                </IconTooltip>
-                              </>
-                            )}
-                          </CardAction>
-                        </CardHeader>
-
-                        <CardContent>
-                          {selection ? (
-                            <div className="flex min-w-0 flex-col gap-2">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <Badge variant="secondary">
-                                  {selection.tagName}
-                                </Badge>
-                                {selection.editable && (
-                                  <Badge variant="outline">
-                                    {t(locale, "editable")}
-                                  </Badge>
-                                )}
-                                <span className="text-xs tabular-nums text-muted-foreground">
-                                  {selection.text.length}{" "}
-                                  {t(locale, "characters")}
-                                </span>
-                              </div>
-                              {selectionContent && (
-                                <p
-                                  id="hyperpage-selection-content"
-                                  data-expanded={selectionExpanded}
-                                  className={cn(
-                                    "hp-selection-content break-words whitespace-pre-wrap text-sm leading-5 text-muted-foreground",
-                                    selectionExpanded
-                                      ? "max-h-64 overflow-y-auto pr-1"
-                                      : "line-clamp-3",
+                                  {selectionExpanded ? (
+                                    <Minimize2 />
+                                  ) : (
+                                    <Maximize2 />
                                   )}
-                                >
-                                  {selectionContent}
-                                </p>
-                              )}
-                            </div>
-                          ) : (
-                            <Empty className="min-h-20 p-2">
-                              <EmptyHeader>
-                                <EmptyMedia variant="icon">
-                                  <MousePointer2 />
-                                </EmptyMedia>
-                                <EmptyTitle>
-                                  {t(locale, "noSelection")}
-                                </EmptyTitle>
-                              </EmptyHeader>
-                            </Empty>
+                                </Button>
+                              </IconTooltip>
+                            </>
                           )}
-                        </CardContent>
+                        </div>
+                      </div>
 
-                        <CardFooter className="gap-2">
-                          <Button
-                            className="min-w-0 flex-1"
-                            disabled={
-                              !pageReady ||
-                              pageState.selecting ||
-                              Boolean(pending)
-                            }
-                            onClick={() =>
-                              void runPageCommand({ type: "start-selection" })
-                            }
-                          >
-                            {pageState.selecting ? (
-                              <Spinner data-icon="inline-start" />
-                            ) : selection ? (
-                              <RefreshCw data-icon="inline-start" />
-                            ) : (
-                              <MousePointer2 data-icon="inline-start" />
-                            )}
-                            {t(
-                              locale,
-                              pageState.selecting
-                                ? "selecting"
-                                : selection
-                                  ? "reselect"
-                                  : "selectElement",
-                            )}
-                          </Button>
-                          <ButtonGroup
-                            aria-label={t(locale, "selectedElement")}
-                          >
-                            <IconTooltip label={t(locale, "selectParent")}>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                aria-label={t(locale, "selectParent")}
-                                disabled={
-                                  !pageReady ||
-                                  !selection ||
-                                  pageState.selecting ||
-                                  Boolean(pending)
-                                }
-                                onClick={() =>
-                                  void runPageCommand({ type: "select-parent" })
-                                }
+                      <div>
+                        {selection ? (
+                          <div className="flex min-w-0 flex-col gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge variant="secondary">
+                                {selection.tagName}
+                              </Badge>
+                              {selection.editable && (
+                                <Badge variant="outline">
+                                  {t(locale, "editable")}
+                                </Badge>
+                              )}
+                              <span className="text-xs tabular-nums text-muted-foreground">
+                                {selection.text.length}{" "}
+                                {t(locale, "characters")}
+                              </span>
+                            </div>
+                            {selectionContent && (
+                              <p
+                                id="hyperpage-selection-content"
+                                data-expanded={selectionExpanded}
+                                className={cn(
+                                  "hp-selection-content break-words whitespace-pre-wrap text-sm leading-5 text-muted-foreground",
+                                  selectionExpanded
+                                    ? "max-h-64 overflow-y-auto pr-1"
+                                    : "line-clamp-3",
+                                )}
                               >
-                                <ChevronUp />
-                              </Button>
-                            </IconTooltip>
-                            <IconTooltip label={t(locale, "cancelSelection")}>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                aria-label={t(locale, "cancelSelection")}
-                                disabled={
-                                  !pageReady ||
-                                  Boolean(pending) ||
-                                  (!selection && !pageState.selecting)
-                                }
-                                onClick={() =>
-                                  void runPageCommand({
-                                    type: "cancel-selection",
-                                  })
-                                }
-                              >
-                                <X />
-                              </Button>
-                            </IconTooltip>
-                          </ButtonGroup>
-                        </CardFooter>
-                      </Card>
-                    )}
+                                {selectionContent}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <Empty className="min-h-20 p-2">
+                            <EmptyHeader>
+                              <EmptyMedia variant="icon">
+                                <MousePointer2 />
+                              </EmptyMedia>
+                              <EmptyTitle>
+                                {t(locale, "noSelection")}
+                              </EmptyTitle>
+                            </EmptyHeader>
+                          </Empty>
+                        )}
+                      </div>
 
-                  <TabsContent value="ai" className="flex flex-col gap-3">
+                      <div className="flex gap-2">
+                        <Button
+                          className="min-w-0 flex-1"
+                          disabled={
+                            !pageReady ||
+                            pageState.selecting ||
+                            Boolean(pending)
+                          }
+                          onClick={() =>
+                            void runPageCommand({ type: "start-selection" })
+                          }
+                        >
+                          {pageState.selecting ? (
+                            <Spinner data-icon="inline-start" />
+                          ) : selection ? (
+                            <RefreshCw data-icon="inline-start" />
+                          ) : (
+                            <MousePointer2 data-icon="inline-start" />
+                          )}
+                          {t(
+                            locale,
+                            pageState.selecting
+                              ? "selecting"
+                              : selection
+                                ? "reselect"
+                                : "selectElement",
+                          )}
+                        </Button>
+                        <ButtonGroup aria-label={t(locale, "selectedElement")}>
+                          <IconTooltip label={t(locale, "selectParent")}>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              aria-label={t(locale, "selectParent")}
+                              disabled={
+                                !pageReady ||
+                                !selection ||
+                                pageState.selecting ||
+                                Boolean(pending)
+                              }
+                              onClick={() =>
+                                void runPageCommand({ type: "select-parent" })
+                              }
+                            >
+                              <ChevronUp />
+                            </Button>
+                          </IconTooltip>
+                          <IconTooltip label={t(locale, "cancelSelection")}>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              aria-label={t(locale, "cancelSelection")}
+                              disabled={
+                                !pageReady ||
+                                Boolean(pending) ||
+                                (!selection && !pageState.selecting)
+                              }
+                              onClick={() =>
+                                void runPageCommand({
+                                  type: "cancel-selection",
+                                })
+                              }
+                            >
+                              <X />
+                            </Button>
+                          </IconTooltip>
+                        </ButtonGroup>
+                      </div>
+                    </section>
+                  )}
+
+                  <TabsContent value="writing" keepMounted className="min-w-0 data-[hidden]:hidden">
+                    <WritingTools locale={locale} disabled={actionsDisabled} hasSource={hasText} running={pending?.action === "write"} onStop={() => void handleCancelRequest()} onRun={(options) => void runAi({ action: "write", options })} />
+                  </TabsContent>
+                  <TabsContent value="tools" keepMounted className="flex flex-col gap-4 data-[hidden]:hidden">
+                    <FieldGroup>
+                      <Field data-disabled={actionsDisabled}>
+                        <FieldLabel htmlFor="tool-prompt">{t(locale, "custom")}</FieldLabel>
+                          <AiComposer
+                            id="tool-prompt"
+                            locale={locale}
+                            value={toolPrompt}
+                            disabled={actionsDisabled}
+                            running={pending?.action === "custom"}
+                            onStop={() => void handleCancelRequest()}
+                            canSubmit={!toolPromptDisabled && Boolean(toolPrompt.trim())}
+                            onSubmit={handleToolPromptSubmit}
+                            placeholder={t(locale, selection ? "customPrompt" : "customGeneralPrompt")}
+                            onChange={(event) => setToolPrompt(event.target.value)}
+                          />
+                      </Field>
+                    </FieldGroup>
                     <section
                       className="flex flex-col gap-2"
                       aria-labelledby="text-tools-heading"
@@ -2103,96 +2323,269 @@ export function App({ initialOpen }: AppProps) {
                       </div>
                     </section>
 
-                    <section
-                      className="flex flex-col gap-2"
-                      aria-labelledby="visual-tools-heading"
-                    >
-                      <h2
-                        id="visual-tools-heading"
-                        className="text-xs font-medium text-muted-foreground"
-                      >
-                        {t(locale, "visualTools")}
-                      </h2>
+                    <section className="flex flex-col gap-2" aria-labelledby="visual-tools-heading">
+                      <h2 id="visual-tools-heading" className="text-xs font-medium text-muted-foreground">{t(locale, "visualTools")}</h2>
                       <div className="grid grid-cols-2 gap-2">
-                        <AiActionButton
-                          icon={ScanText}
-                          label={t(locale, "ocr")}
-                          disabled={actionsDisabled || !canUseVision || !visual}
-                          onClick={() => void runAi({ action: "ocr" })}
-                        />
-                        <AiActionButton
-                          icon={Image}
-                          label={t(locale, "imagePrompt")}
-                          disabled={actionsDisabled || !canAnalyzeImage}
-                          onClick={() => void runAi({ action: "image-prompt" })}
-                        />
+                        <AiActionButton icon={ScanText} label={t(locale, "ocr")} disabled={actionsDisabled || !canUseVision || !visual} onClick={() => void runAi({ action: "ocr" })} />
+                        <AiActionButton icon={Image} label={t(locale, "imagePrompt")} disabled={actionsDisabled || !canAnalyzeImage} onClick={() => void runAi({ action: "image-prompt" })} />
                       </div>
                     </section>
-
+                    <Collapsible className="flex flex-col gap-2 border-t pt-3">
+                      <CollapsibleTrigger render={<Button variant="ghost" className="justify-start" />}><Languages data-icon="inline-start" />{t(locale, "translationWorkspace")}<ChevronDown data-icon="inline-end" className="ml-auto" /></CollapsibleTrigger>
+                      <CollapsibleContent className="flex flex-col gap-3">
+                        <ReadingContext locale={locale} snapshot={readingSnapshot} selectedIds={readingBlockIds} loading={readingLoading} disabled={Boolean(pending)} onRead={() => void handleReadPage()} onSelect={setReadingBlockIds} onPrompt={(prompt) => { setChatContext("page"); setCustomPrompt(prompt); setMainTab("chat"); setAttachmentExpanded(true); }} />
+                        <PageTranslationTools locale={locale} source={selectedReadingSnapshot} targetLanguage={getTaskProvider(settings, "text")?.targetLanguage ?? ""} preview={translationPreview} mode={translationMode} disabled={Boolean(pending) || readingLoading} running={pending?.action === "translate-page"} onRun={(language, terms) => void handleTranslatePage(language, terms)} onCommand={(command) => void handleTranslationCommand(command)} onCancel={() => void handleCancelRequest()} onError={notify.error} />
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </TabsContent>
+                  <TabsContent value="chat" keepMounted className="flex min-h-0 flex-col data-[hidden]:hidden">
                     <section
-                      className="flex flex-col gap-2"
+                      className="flex min-h-0 flex-1 flex-col"
                       aria-labelledby="custom-task-heading"
                     >
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
                         <h2
                           id="custom-task-heading"
-                          className="text-xs font-medium text-muted-foreground"
+                          className="min-w-0 flex-1 truncate text-sm font-medium"
                         >
-                          {t(locale, "customTask")}
+                          {conversationLibraryOpen ? t(locale, "savedConversations") : savedConversation?.name ?? t(locale, "navChat")}
                         </h2>
-                        {selection && (
-                          <Badge variant="outline">
-                            {t(locale, "selectedElementContext")}
-                          </Badge>
-                        )}
+                        <div className="ml-auto flex flex-wrap items-center gap-1">
+                          {chatTurns.length > 0 && <TextExport locale={locale} filename="hyperpage-conversation" disabled={Boolean(pending)} content={() => conversationToMarkdown(chatTurns, { user: t(locale, "userMessage"), assistant: t(locale, "assistant"), incomplete: t(locale, "generationIncomplete") })} />}
+                          <Button size="sm" variant="ghost" aria-expanded={conversationLibraryOpen} disabled={Boolean(pending)} onClick={() => setConversationLibraryOpen((open) => !open)}>{conversationLibraryOpen ? <ArrowLeft data-icon="inline-start" /> : <HistoryIcon data-icon="inline-start" />}{t(locale, conversationLibraryOpen ? "backToConversation" : "conversationHistory")}</Button>
+                          <IconTooltip label={t(locale, "newConversation")}>
+                            <Button
+                              size="icon-xs"
+                              variant="ghost"
+                              aria-label={t(locale, "newConversation")}
+                              disabled={Boolean(pending) || readingLoading}
+                              onClick={handleClearChat}
+                            >
+                              <Plus />
+                            </Button>
+                          </IconTooltip>
+                        </div>
                       </div>
+
+                      {conversationLibraryOpen ? <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3"><ConversationLibrary locale={locale} turns={chatTurns} current={savedConversation} disabled={Boolean(pending) || readingLoading} onLoad={handleLoadConversation} onSaved={setSavedConversation} /></div> : <>
+
+                      {chatMessages.length > 0 ? (
+                        <MessageScrollerProvider autoScroll>
+                          <MessageScroller className="min-h-0 flex-1">
+                            <MessageScrollerViewport
+                              aria-label={t(locale, "conversation")}
+                            >
+                              <MessageScrollerContent className="gap-3 p-3">
+                                {chatMessages.map((message) => (
+                                  <MessageScrollerItem
+                                    key={message.id}
+                                    messageId={message.id}
+                                    scrollAnchor={
+                                      message.role === "assistant" &&
+                                      message.status === "streaming"
+                                    }
+                                  >
+                                    <Message
+                                      align={
+                                        message.role === "user"
+                                          ? "end"
+                                          : "start"
+                                      }
+                                    >
+                                      <MessageContent>
+                                        <MessageHeader>
+                                          {t(locale, message.role === "user" ? "userMessage" : "assistant")}
+                                          {message.role === "user" && message.context !== "none" && <Badge variant="outline">{t(locale, message.context === "image" ? "resourceKind_image" : message.context === "file" ? "fileContext" : message.context === "elements" ? "multipleElementsContext" : message.context === "page" ? "currentPageContext" : "selectedElementContext")}</Badge>}
+                                        </MessageHeader>
+                                        <Bubble
+                                          align={
+                                            message.role === "user"
+                                              ? "end"
+                                              : "start"
+                                          }
+                                          variant={
+                                            message.role === "user"
+                                              ? "secondary"
+                                              : "ghost"
+                                          }
+                                        >
+                                          <BubbleContent
+                                            aria-live={
+                                              message.status === "streaming"
+                                                ? "polite"
+                                                : undefined
+                                            }
+                                            className={cn(
+                                              message.role === "user" &&
+                                                "whitespace-pre-wrap",
+                                              message.role === "assistant" &&
+                                                "hp-markdown",
+                                            )}
+                                          >
+                                            {message.role === "assistant" ? (
+                                              message.content ? (
+                                                <ReadingAnswer content={message.content} citations={message.citations ?? []} locale={locale} onLocate={handleLocateCitation} onCopy={(text) => void handleCopyChatMessage(text)} />
+                                              ) : message.status ===
+                                                "streaming" ? (
+                                                <Spinner
+                                                  aria-label={t(
+                                                    locale,
+                                                    "processing",
+                                                  )}
+                                                />
+                                              ) : (
+                                                t(
+                                                  locale,
+                                                  message.status === "cancelled"
+                                                    ? "generationStopped"
+                                                    : "generationFailed",
+                                                )
+                                              )
+                                            ) : (
+                                              message.content
+                                            )}
+                                          </BubbleContent>
+                                        </Bubble>
+                                        {message.role === "user" && <MessageFooter>
+                                          <IconTooltip label={t(locale, "editMessage")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "editMessage")} disabled={Boolean(pending) || readingLoading} onClick={() => handleEditTurn(message.turnIndex)}><Pencil /></Button></IconTooltip>
+                                        </MessageFooter>}
+                                        {message.role === "assistant" &&
+                                          message.status !== "streaming" && (
+                                            <MessageFooter className="flex-wrap gap-1">
+                                              <IconTooltip label={t(locale, "regenerateResponse")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "regenerateResponse")} disabled={Boolean(pending) || readingLoading} onClick={() => {
+                                                const turn = chatTurns[message.turnIndex];
+                                                if (turn) void sendConversationTurn(turn.prompt, turn.snapshot, turn.webSearch === true, message.turnIndex, true);
+                                              }}><RefreshCw /></Button></IconTooltip>
+                                              {message.content && <TextExport content={() => answerToMarkdown(message.content, message.citations ?? [])} filename="hyperpage-answer" locale={locale} disabled={Boolean(pending)} />}
+                                              {message.content && <ResultActions text={message.content} locale={locale} state={pageState} disabled={Boolean(pending)} onState={applyPageState} onError={notify.error} />}
+                                              {message.status !== "complete" &&
+                                                message.content && (
+                                                  <span>
+                                                    {t(
+                                                      locale,
+                                                      message.status ===
+                                                        "cancelled"
+                                                        ? "generationStopped"
+                                                        : "generationFailed",
+                                                    )}
+                                                  </span>
+                                                )}
+                                              {message.content && (
+                                                <IconTooltip
+                                                  label={t(
+                                                    locale,
+                                                    "copyResponse",
+                                                  )}
+                                                >
+                                                  <Button
+                                                    size="icon-xs"
+                                                    variant="ghost"
+                                                    aria-label={t(
+                                                      locale,
+                                                      "copyResponse",
+                                                    )}
+                                                    onClick={() =>
+                                                      void handleCopyChatMessage(
+                                                        answerToMarkdown(message.content, message.citations ?? []),
+                                                      )
+                                                    }
+                                                  >
+                                                    <Copy />
+                                                  </Button>
+                                                </IconTooltip>
+                                              )}
+                                            </MessageFooter>
+                                          )}
+                                      </MessageContent>
+                                    </Message>
+                                  </MessageScrollerItem>
+                                ))}
+                              </MessageScrollerContent>
+                            </MessageScrollerViewport>
+                            <MessageScrollerButton
+                              aria-label={t(locale, "scrollToLatest")}
+                            />
+                          </MessageScroller>
+                        </MessageScrollerProvider>
+                      ) : <Empty className="min-h-0 flex-1"><EmptyHeader><EmptyMedia variant="icon"><MessageSquareText /></EmptyMedia><EmptyTitle>{t(locale, "newConversation")}</EmptyTitle></EmptyHeader></Empty>}
+
+                      <div className="flex max-h-[60%] shrink-0 flex-col gap-2 overflow-y-auto border-t bg-background p-3" data-chat-composer>
+                      <input ref={fileInputRef} type="file" accept=".txt,.md,.markdown,text/plain,text/markdown" className="hidden" aria-label={t(locale, "chooseTextFile")} disabled={Boolean(pending) || readingLoading} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void handleTextFile(file); }} />
+
+                      {editingTurnIndex !== null ? (
+                        <div className="flex min-w-0 flex-col gap-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium">{t(locale, "editingMessage")}</span>
+                            <IconTooltip label={t(locale, "cancelEditingMessage")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "cancelEditingMessage")} onClick={() => { setEditingTurnIndex(null); setCustomPrompt(""); }}><X /></Button></IconTooltip>
+                          </div>
+                          {chatTurns[editingTurnIndex]?.snapshot.type === "page" && <div className="text-xs text-muted-foreground">{t(locale, "currentPageContext")}</div>}
+                          <details className="text-xs break-words"><summary>{t(locale, "originalContext")}</summary>{(() => {
+                            const snapshot = chatTurns[editingTurnIndex]?.snapshot;
+                            return snapshot && <SnapshotPreview key={editingTurnIndex} snapshot={snapshot} locale={locale} />;
+                          })()}</details>
+                        </div>
+                      ) : chatContext !== "none" && <Collapsible open={attachmentExpanded} onOpenChange={setAttachmentExpanded} className="flex flex-col gap-2">
+                        <Attachment>
+                          <AttachmentMedia>{readingLoading ? <Spinner /> : chatContext === "video" ? <Captions /> : chatContext === "elements" ? <MousePointer2 /> : <FileText />}</AttachmentMedia>
+                          <AttachmentContent><AttachmentTitle>{chatContext === "file" ? fileSnapshot?.name ?? t(locale, "fileContext") : chatContext === "page" ? readingSnapshot?.title ?? t(locale, "currentPageContext") : chatContext === "video" ? videoSnapshot?.title ?? t(locale, "videoContext") : `${t(locale, "attachedPageContent")} (${contextElements.length})`}</AttachmentTitle></AttachmentContent>
+                          <IconTooltip label={t(locale, "previewAttachment")}><CollapsibleTrigger render={<Button size="icon-xs" variant="ghost" aria-label={t(locale, "previewAttachment")} />}><ChevronDown /></CollapsibleTrigger></IconTooltip>
+                          <IconTooltip label={t(locale, "removeAttachment")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "removeAttachment")} disabled={Boolean(pending) || readingLoading} onClick={() => setChatContext("none")}><X /></Button></IconTooltip>
+                        </Attachment>
+                        <CollapsibleContent className="flex max-h-56 flex-col gap-3 overflow-y-auto">
+                        {chatContext === "page" && <ReadingContext locale={locale} snapshot={readingSnapshot} selectedIds={readingBlockIds} loading={readingLoading} disabled={Boolean(pending)} onRead={() => void handleReadPage()} onSelect={setReadingBlockIds} onPrompt={(prompt) => void handleChatSubmit(prompt)} />}
+                        {chatContext === "video" && <ReadingContext locale={locale} sourceType="video" snapshot={videoSnapshot} selectedIds={videoBlockIds} loading={readingLoading} disabled={Boolean(pending)} onRead={() => void handleReadVideo()} onSelect={setVideoBlockIds} />}
+                        {chatContext === "elements" && <ElementsContext locale={locale} pages={contextElements} disabled={Boolean(pending)} loading={readingLoading} onAdd={() => void handleSelectContextElement()} onRemove={(id) => { const remaining = contextElements.filter((page) => page.id !== id); setContextElements(remaining); if (!remaining.length) setChatContext("none"); }} onClear={() => { setContextElements([]); setChatContext("none"); }} />}
+                        {chatContext === "file" && <>
+                          <ReadingContext locale={locale} sourceType="file" snapshot={fileSnapshot} selectedIds={fileBlockIds} loading={readingLoading} disabled={Boolean(pending)} onRead={() => fileInputRef.current?.click()} onSelect={setFileBlockIds} onPrompt={(prompt) => void handleChatSubmit(prompt)} onClear={() => { setFileSnapshot(null); setFileBlockIds([]); }} />
+                        </>}
+                        </CollapsibleContent>
+                      </Collapsible>}
+
+                      {templatesOpen && <div className="max-h-56 overflow-y-auto"><PromptTemplates locale={locale} disabled={actionsDisabled || readingLoading} onUse={(prompt) => { setCustomPrompt(prompt); setTemplatesOpen(false); customPromptInputRef.current?.focus(); }} /></div>}
                       <Field data-disabled={actionsDisabled}>
                         <FieldLabel htmlFor="custom-prompt" className="sr-only">
                           {t(locale, "custom")}
                         </FieldLabel>
-                        <InputGroup>
-                          <InputGroupTextarea
+                          <AiComposer
                             id="custom-prompt"
-                            className="min-h-20"
+                            locale={locale}
+                            ref={customPromptInputRef}
                             value={customPrompt}
                             disabled={actionsDisabled}
-                            placeholder={t(
-                              locale,
-                              selection
-                                ? "customSelectionPrompt"
-                                : "customGeneralPrompt",
+                            running={pending?.action === "chat"}
+                            onStop={() => void handleCancelRequest()}
+                            canSubmit={!(
+                              readingLoading ||
+                              (editingTurnIndex === null && chatContext === "page" && (!readingSnapshot || !readingBlockIds.length)) ||
+                              (editingTurnIndex === null && chatContext === "video" && (!videoSnapshot || !videoBlockIds.length)) ||
+                              (editingTurnIndex === null && chatContext === "elements" && !contextElements.length) ||
+                              (editingTurnIndex === null && chatContext === "file" && (!fileSnapshot || !fileBlockIds.length)) ||
+                              !customPrompt.trim()
                             )}
+                            onSubmit={() => void handleChatSubmit()}
+                            placeholder={t(locale, "customGeneralPrompt")}
                             onChange={(event) =>
                               setCustomPrompt(event.target.value)
                             }
+                            toolbar={<>
+                            <DropdownMenu>
+                              <IconTooltip label={t(locale, "addAttachment")}><DropdownMenuTrigger render={<InputGroupButton size="icon-sm" aria-label={t(locale, "addAttachment")} disabled={actionsDisabled || readingLoading || editingTurnIndex !== null} />}><Paperclip /></DropdownMenuTrigger></IconTooltip>
+                              <DropdownMenuContent side="top">
+                                <DropdownMenuGroup>
+                                  <DropdownMenuItem onClick={() => { setChatContext("page"); setAttachmentExpanded(true); void handleReadPage(); }}><FileText />{t(locale, "currentPageContext")}</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => void handleSelectContextElement()}><MousePointer2 />{t(locale, "selectPageContent")}</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => fileInputRef.current?.click()}><Upload />{t(locale, "fileContext")}</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => { setChatContext("video"); setAttachmentExpanded(true); void handleReadVideo(); }}><Captions />{t(locale, "videoContext")}</DropdownMenuItem>
+                                </DropdownMenuGroup>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                            <IconTooltip label={t(locale, "promptTemplates")}><InputGroupButton size="icon-sm" aria-label={t(locale, "promptTemplates")} aria-expanded={templatesOpen} disabled={actionsDisabled} onClick={() => setTemplatesOpen(!templatesOpen)}><Sparkles /></InputGroupButton></IconTooltip>
+                            {!chatTurns.some((turn) => turn.snapshot.type === "image") && <WebSearchToggle locale={locale} capability={webSearchCapability} checked={editingTurnIndex === null ? webSearch : chatTurns[editingTurnIndex]?.webSearch === true} disabled={actionsDisabled || editingTurnIndex !== null} onChange={setWebSearch} />}
+                            </>}
                           />
-                          <InputGroupAddon align="block-end">
-                            <InputGroupButton
-                              variant="ghost"
-                              size="sm"
-                              disabled={actionsDisabled || !customPrompt.trim()}
-                              onClick={handleCustomPageTask}
-                            >
-                              <Play data-icon="inline-start" />
-                              {t(locale, "runPageTask")}
-                            </InputGroupButton>
-                            <InputGroupButton
-                              variant="default"
-                              size="sm"
-                              className="ml-auto"
-                              disabled={
-                                actionsDisabled ||
-                                Boolean(selection && !canUseTextAi) ||
-                                !customPrompt.trim()
-                              }
-                              onClick={handleCustomSubmit}
-                            >
-                              <Send data-icon="inline-start" />
-                              {t(locale, "custom")}
-                            </InputGroupButton>
-                          </InputGroupAddon>
-                        </InputGroup>
                       </Field>
+                      </div>
+                      </>}
                     </section>
                   </TabsContent>
 
@@ -2222,29 +2615,54 @@ export function App({ initialOpen }: AppProps) {
                         </Alert>
 
                         <Field data-disabled={actionsDisabled}>
-                          <div className="flex items-center justify-between gap-2">
-                            <FieldLabel htmlFor="page-task">
-                              {t(locale, "pageTask")}
-                            </FieldLabel>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8"
-                              disabled={actionsDisabled || pageState.selecting}
-                              onClick={() =>
-                                void handlePageTaskElementSelection()
-                              }
-                            >
-                              <MousePointer2 data-icon="inline-start" />
-                              {t(locale, "insertPageTaskElement")}
-                            </Button>
-                          </div>
-                          <InputGroup>
-                            <div className="relative w-full">
-                              <div
+                          <FieldLabel htmlFor="page-task">{t(locale, "pageTask")}</FieldLabel>
+                          <AiComposer
+                            id="page-task"
+                            locale={locale}
+                            ref={pageTaskInputRef}
+                            className="leading-5"
+                            value={pageTask}
+                            disabled={actionsDisabled}
+                            running={pending?.action === "operate-page"}
+                            onStop={() => void handleCancelRequest()}
+                            stopLabel={t(locale, "stopPageTask")}
+                            canSubmit={Boolean(pageTask.trim()) && parameterTask === null}
+                            submitLabel={t(locale, "startPageTask")}
+                            submitIcon={Play}
+                            onSubmit={() => void preparePageTask(pageTask, taskSites)}
+                            placeholder={t(locale, "pageTaskPlaceholder")}
+                            onChange={(event) => {
+                              setPageTask(event.target.value);
+                              setParameterTask(null);
+                            }}
+                            onScroll={(event) => {
+                              const highlight = pageTaskHighlightRef.current;
+                              if (!highlight) return;
+                              highlight.scrollTop = event.currentTarget.scrollTop;
+                              highlight.scrollLeft = event.currentTarget.scrollLeft;
+                            }}
+                            toolbar={<>
+                              <IconTooltip label={t(locale, "insertPageTaskElement")}>
+                                <InputGroupButton size="icon-sm" aria-label={t(locale, "insertPageTaskElement")} disabled={actionsDisabled || pageState.selecting} onClick={() => void handlePageTaskElementSelection()}>
+                                  <MousePointer2 />
+                                </InputGroupButton>
+                              </IconTooltip>
+                              {!workflowEditor && (
+                                <IconTooltip label={t(locale, "saveWorkflow")}>
+                                  <InputGroupButton
+                                    size="icon-sm"
+                                    aria-label={t(locale, "saveWorkflow")}
+                                    disabled={Boolean(pending) || workflowMutationPending || !pageTask.trim()}
+                                    onClick={() => setWorkflowEditor({ mode: "create", name: "" })}
+                                  >
+                                    <BookmarkPlus />
+                                  </InputGroupButton>
+                                </IconTooltip>
+                              )}
+                            </>}
+                            overlay={<div
                                 ref={pageTaskHighlightRef}
-                                className="pointer-events-none absolute inset-0 min-h-28 overflow-hidden px-2.5 py-2 text-base leading-5 whitespace-pre-wrap text-transparent break-words select-none md:text-sm"
+                                className="pointer-events-none absolute inset-0 overflow-hidden px-2.5 py-2 text-base leading-5 whitespace-pre-wrap text-transparent break-words select-none md:text-sm"
                                 aria-hidden="true"
                                 data-page-task-highlight
                               >
@@ -2262,235 +2680,142 @@ export function App({ initialOpen }: AppProps) {
                                       segment
                                     ),
                                 )}
-                              </div>
-                              <InputGroupTextarea
-                                id="page-task"
-                                ref={pageTaskInputRef}
-                                className="relative min-h-28 w-full"
-                                value={pageTask}
-                                disabled={actionsDisabled}
-                                placeholder={t(locale, "pageTaskPlaceholder")}
-                                onChange={(event) =>
-                                  setPageTask(event.target.value)
-                                }
-                                onScroll={(event) => {
-                                  const highlight =
-                                    pageTaskHighlightRef.current;
-                                  if (!highlight) return;
-                                  highlight.scrollTop =
-                                    event.currentTarget.scrollTop;
-                                  highlight.scrollLeft =
-                                    event.currentTarget.scrollLeft;
-                                }}
-                                onKeyDown={(event) => {
-                                  if (
-                                    event.key === "Enter" &&
-                                    !event.shiftKey &&
-                                    !event.nativeEvent.isComposing
-                                  ) {
-                                    event.preventDefault();
-                                    void runPageAgent(pageTask);
-                                  }
-                                }}
-                              />
-                            </div>
-                            <InputGroupAddon align="block-end">
-                              {!workflowEditor && (
-                                <InputGroupButton
-                                  variant="ghost"
-                                  size="sm"
-                                  disabled={
-                                    Boolean(pending) ||
-                                    workflowMutationPending ||
-                                    !pageTask.trim()
-                                  }
-                                  onClick={handleCreateWorkflow}
-                                >
-                                  <BookmarkPlus data-icon="inline-start" />
-                                  {t(locale, "saveWorkflow")}
-                                </InputGroupButton>
-                              )}
-                              <InputGroupButton
-                                variant="default"
-                                size="sm"
-                                className="ml-auto"
-                                disabled={actionsDisabled || !pageTask.trim()}
-                                onClick={() => void runPageAgent(pageTask)}
-                              >
-                                <Play data-icon="inline-start" />
-                                {t(locale, "startPageTask")}
-                              </InputGroupButton>
-                            </InputGroupAddon>
-                          </InputGroup>
+                              </div>}
+                          />
                         </Field>
 
                         {workflowEditor && (
-                          <Field data-disabled={workflowMutationPending}>
-                            <FieldLabel htmlFor="workflow-name">
-                              {t(locale, "workflowName")}
-                            </FieldLabel>
-                            <InputGroup>
-                              <InputGroupInput
-                                id="workflow-name"
-                                autoFocus
-                                value={workflowEditor.name}
-                                disabled={workflowMutationPending}
-                                placeholder={t(
-                                  locale,
-                                  "workflowNamePlaceholder",
-                                )}
-                                onChange={(event) =>
-                                  setWorkflowEditor({
-                                    ...workflowEditor,
-                                    name: event.target.value,
-                                  })
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === "Escape") {
-                                    setWorkflowEditor(undefined);
-                                  } else if (
-                                    event.key === "Enter" &&
-                                    !event.nativeEvent.isComposing
-                                  ) {
-                                    event.preventDefault();
-                                    void handleSaveWorkflow();
-                                  }
-                                }}
-                              />
-                              <InputGroupAddon align="inline-end">
-                                <IconTooltip
-                                  label={t(locale, "cancelWorkflowEdit")}
-                                >
-                                  <InputGroupButton
-                                    size="icon-xs"
-                                    aria-label={t(locale, "cancelWorkflowEdit")}
-                                    disabled={workflowMutationPending}
-                                    onClick={() => setWorkflowEditor(undefined)}
-                                  >
-                                    <X />
-                                  </InputGroupButton>
-                                </IconTooltip>
-                                <IconTooltip
-                                  label={
-                                    workflowEditor.mode === "create"
-                                      ? t(locale, "saveWorkflow")
-                                      : t(locale, "saveWorkflowChanges")
-                                  }
-                                >
-                                  <InputGroupButton
-                                    size="icon-xs"
-                                    aria-label={
-                                      workflowEditor.mode === "create"
-                                        ? t(locale, "saveWorkflow")
-                                        : t(locale, "saveWorkflowChanges")
+                          <FieldGroup>
+                            <Field data-disabled={Boolean(pending) || workflowMutationPending}>
+                              <FieldLabel htmlFor="workflow-name">{t(locale, "workflowName")}</FieldLabel>
+                              <InputGroup>
+                                <InputGroupInput
+                                  id="workflow-name"
+                                  autoFocus
+                                  value={workflowEditor.name}
+                                  disabled={Boolean(pending) || workflowMutationPending}
+                                  placeholder={t(locale, "workflowNamePlaceholder")}
+                                  onChange={(event) => setWorkflowEditor({ ...workflowEditor, name: event.target.value })}
+                                  onKeyDown={(event) => {
+                                    if (event.nativeEvent.isComposing) return;
+                                    if (event.key === "Escape") setWorkflowEditor(undefined);
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      void handleSaveWorkflow();
                                     }
-                                    disabled={
-                                      workflowMutationPending ||
-                                      !workflowEditor.name.trim() ||
-                                      !pageTask.trim()
-                                    }
-                                    onClick={() => void handleSaveWorkflow()}
-                                  >
-                                    {workflowMutationPending ? (
-                                      <Spinner />
-                                    ) : (
-                                      <Check />
-                                    )}
-                                  </InputGroupButton>
-                                </IconTooltip>
-                              </InputGroupAddon>
-                            </InputGroup>
-                          </Field>
+                                  }}
+                                />
+                                <InputGroupAddon align="inline-end">
+                                  <IconTooltip label={t(locale, "cancelWorkflowEdit")}>
+                                    <InputGroupButton
+                                      size="icon-xs"
+                                      aria-label={t(locale, "cancelWorkflowEdit")}
+                                      disabled={Boolean(pending) || workflowMutationPending}
+                                      onClick={() => setWorkflowEditor(undefined)}
+                                    >
+                                      <X />
+                                    </InputGroupButton>
+                                  </IconTooltip>
+                                  <IconTooltip label={t(locale, workflowEditor.mode === "create" ? "saveWorkflow" : "saveWorkflowChanges")}>
+                                    <InputGroupButton
+                                      size="icon-xs"
+                                      aria-label={t(locale, workflowEditor.mode === "create" ? "saveWorkflow" : "saveWorkflowChanges")}
+                                      disabled={Boolean(pending) || workflowMutationPending || !workflowEditor.name.trim() || !pageTask.trim()}
+                                      onClick={() => void handleSaveWorkflow()}
+                                    >
+                                      {workflowMutationPending ? <Spinner /> : <Check />}
+                                    </InputGroupButton>
+                                  </IconTooltip>
+                                </InputGroupAddon>
+                              </InputGroup>
+                            </Field>
+                          </FieldGroup>
                         )}
 
-                        <section
-                          className="flex min-w-0 flex-col gap-2"
-                          aria-labelledby="saved-workflows-heading"
-                        >
-                          <h2
-                            id="saved-workflows-heading"
-                            className="text-xs font-medium text-muted-foreground"
-                          >
-                            {t(locale, "savedWorkflows")}
-                          </h2>
+                        <Collapsible className="flex flex-col gap-2">
+                          <CollapsibleTrigger render={<Button size="sm" variant="ghost" className="justify-start" />}>
+                            {t(locale, "allowedSites")}
+                            <ChevronDown data-icon="inline-end" className="ml-auto" />
+                          </CollapsibleTrigger>
+                          <CollapsibleContent>
+                            <Field data-disabled={actionsDisabled}>
+                              <FieldLabel htmlFor="task-sites" className="sr-only">{t(locale, "allowedSites")}</FieldLabel>
+                              <InputGroup>
+                                <InputGroupTextarea id="task-sites" value={taskSites} disabled={actionsDisabled} placeholder={t(locale, "allSites")} onChange={(event) => { setTaskSites(event.target.value); setParameterTask(null); }} />
+                              </InputGroup>
+                            </Field>
+                          </CollapsibleContent>
+                        </Collapsible>
+                        {parameterTask && <TemplateParameters action="run" key={parameterTask.template} template={parameterTask.template} locale={locale} onCancel={() => setParameterTask(null)} onRun={(task) => {
+                          const origins = parameterTask.allowedOrigins;
+                          setParameterTask(null);
+                          setPageTask(task);
+                          void runPageAgent(task, origins);
+                        }} />}
+
+                        <section className="flex min-w-0 flex-col gap-2" aria-labelledby="saved-workflows-heading">
+                          <div className="flex min-w-0 items-center justify-between gap-2">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <h2 id="saved-workflows-heading" className="text-sm font-medium">{t(locale, "savedWorkflows")}</h2>
+                              <Badge variant="outline">{workflows.length}</Badge>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <input
+                                ref={workflowImportRef}
+                                type="file"
+                                accept=".json,application/json"
+                                className="hidden"
+                                aria-label={t(locale, "importWorkflows")}
+                                disabled={Boolean(pending) || workflowMutationPending}
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0];
+                                  event.target.value = "";
+                                  if (file) void handleImportWorkflows(file);
+                                }}
+                              />
+                              <IconTooltip label={t(locale, "importWorkflows")}>
+                                <Button size="icon-xs" variant="ghost" aria-label={t(locale, "importWorkflows")} disabled={Boolean(pending) || workflowMutationPending} onClick={() => workflowImportRef.current?.click()}>
+                                  <Upload />
+                                </Button>
+                              </IconTooltip>
+                              <IconTooltip label={t(locale, "exportWorkflows")}>
+                                <Button size="icon-xs" variant="ghost" aria-label={t(locale, "exportWorkflows")} disabled={workflowMutationPending || !workflows.length} onClick={handleExportWorkflows}>
+                                  <Download />
+                                </Button>
+                              </IconTooltip>
+                            </div>
+                          </div>
                           {workflows.length === 0 ? (
-                            <Empty className="min-h-16 rounded-md border p-3">
+                            <Empty className="min-h-16 p-3">
                               <EmptyHeader>
-                                <EmptyMedia variant="icon">
-                                  <BookmarkPlus />
-                                </EmptyMedia>
-                                <EmptyTitle>
-                                  {t(locale, "noSavedWorkflows")}
-                                </EmptyTitle>
+                                <EmptyMedia variant="icon"><BookmarkPlus /></EmptyMedia>
+                                <EmptyTitle>{t(locale, "noSavedWorkflows")}</EmptyTitle>
                               </EmptyHeader>
                             </Empty>
                           ) : (
-                            <div className="divide-y overflow-hidden rounded-md border">
+                            <div className="flex min-w-0 flex-col divide-y">
                               {workflows.map((workflow) => (
-                                <div
-                                  key={workflow.id}
-                                  className="flex min-w-0 items-start gap-2 p-2.5"
-                                >
+                                <div key={workflow.id} className="flex min-w-0 items-start gap-2 py-2.5">
                                   <div className="min-w-0 flex-1">
-                                    <p className="break-words text-sm font-medium">
-                                      {workflow.name}
-                                    </p>
-                                    <p
-                                      className="line-clamp-2 break-words text-xs leading-5 text-muted-foreground"
-                                      title={workflow.task}
-                                    >
-                                      {workflow.task}
-                                    </p>
+                                    <p className="text-sm font-medium wrap-anywhere">{workflow.name}</p>
+                                    <p className="line-clamp-2 text-xs leading-5 text-muted-foreground wrap-anywhere" title={workflow.task}>{workflow.task}</p>
+                                    {workflow.allowedOrigins.length > 0 && (
+                                      <p className="text-xs text-muted-foreground wrap-anywhere">{workflow.allowedOrigins.join(", ")}</p>
+                                    )}
                                   </div>
                                   <div className="flex shrink-0 items-center gap-0.5">
-                                    <IconTooltip
-                                      label={`${t(locale, "runWorkflow")}: ${workflow.name}`}
-                                    >
-                                      <Button
-                                        size="icon-xs"
-                                        variant="ghost"
-                                        aria-label={`${t(locale, "runWorkflow")}: ${workflow.name}`}
-                                        disabled={actionsDisabled}
-                                        onClick={() =>
-                                          handleRunWorkflow(workflow)
-                                        }
-                                      >
+                                    <IconTooltip label={`${t(locale, "runWorkflow")}: ${workflow.name}`}>
+                                      <Button size="icon-xs" variant="ghost" aria-label={`${t(locale, "runWorkflow")}: ${workflow.name}`} disabled={actionsDisabled} onClick={() => handleRunWorkflow(workflow)}>
                                         <Play />
                                       </Button>
                                     </IconTooltip>
-                                    <IconTooltip
-                                      label={`${t(locale, "editWorkflow")}: ${workflow.name}`}
-                                    >
-                                      <Button
-                                        size="icon-xs"
-                                        variant="ghost"
-                                        aria-label={`${t(locale, "editWorkflow")}: ${workflow.name}`}
-                                        disabled={
-                                          Boolean(pending) ||
-                                          workflowMutationPending
-                                        }
-                                        onClick={() =>
-                                          handleEditWorkflow(workflow)
-                                        }
-                                      >
+                                    <IconTooltip label={`${t(locale, "editWorkflow")}: ${workflow.name}`}>
+                                      <Button size="icon-xs" variant="ghost" aria-label={`${t(locale, "editWorkflow")}: ${workflow.name}`} disabled={Boolean(pending) || workflowMutationPending} onClick={() => handleEditWorkflow(workflow)}>
                                         <Pencil />
                                       </Button>
                                     </IconTooltip>
-                                    <IconTooltip
-                                      label={`${t(locale, "deleteWorkflow")}: ${workflow.name}`}
-                                    >
-                                      <Button
-                                        size="icon-xs"
-                                        variant="ghost"
-                                        aria-label={`${t(locale, "deleteWorkflow")}: ${workflow.name}`}
-                                        disabled={
-                                          Boolean(pending) ||
-                                          workflowMutationPending
-                                        }
-                                        onClick={() =>
-                                          void handleDeleteWorkflow(workflow)
-                                        }
-                                      >
+                                    <IconTooltip label={`${t(locale, "deleteWorkflow")}: ${workflow.name}`}>
+                                      <Button size="icon-xs" variant="ghost" aria-label={`${t(locale, "deleteWorkflow")}: ${workflow.name}`} disabled={Boolean(pending) || workflowMutationPending} onClick={() => void handleDeleteWorkflow(workflow)}>
                                         <Trash2 />
                                       </Button>
                                     </IconTooltip>
@@ -2716,244 +3041,189 @@ export function App({ initialOpen }: AppProps) {
                     </Tabs>
                   </TabsContent>
 
-                  {(pageError ||
-                    pending ||
+                  {mainTab === feedbackTab && (resultPending ||
                     result ||
-                    pageAgentRun ||
-                    error ||
-                    toast) && (
+                    pageAgentRun) && (
                     <section
                       className="flex flex-col gap-2"
                       data-execution-feedback
                       aria-label={t(locale, "result")}
                     >
-                      {pageError && (
-                        <Alert className="hp-feedback" variant="destructive">
-                      <CircleAlert />
-                      <AlertDescription>{pageError}</AlertDescription>
-                    </Alert>
-                  )}
-
-                  {(pending || result || pageAgentRun) && (
-                    <Card
-                      className="hp-feedback"
-                      size="sm"
-                      aria-labelledby="result-heading"
-                    >
-                      <CardHeader className="border-b">
-                        <CardTitle
-                          id="result-heading"
-                          className="flex min-w-0 items-center gap-2"
+                      {(resultPending || result || pageAgentRun) && (
+                        <Card
+                          className="hp-feedback"
+                          size="sm"
+                          aria-labelledby="result-heading"
                         >
-                          {pending ? (
-                            pending.action === "operate-page" ? (
-                              <Bot className="size-4 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <Spinner className="shrink-0" />
-                            )
-                          ) : result?.action === "operate-page" &&
-                            result.status !== "completed" ? (
-                            <CircleAlert
-                              className={cn(
-                                "size-4 shrink-0",
-                                result.status === "failed"
-                                  ? "text-destructive"
-                                  : "text-muted-foreground",
+                          <CardHeader className="border-b">
+                            <CardTitle
+                              id="result-heading"
+                              className="flex min-w-0 items-center gap-2"
+                            >
+                              {resultPending ? (
+                                resultPending.action === "operate-page" ? (
+                                  <Bot className="size-4 shrink-0 text-muted-foreground" />
+                                ) : (
+                                  <Spinner className="shrink-0" />
+                                )
+                              ) : result?.action === "operate-page" &&
+                                result.status !== "completed" ? (
+                                <CircleAlert
+                                  className={cn(
+                                    "size-4 shrink-0",
+                                    result.status === "failed"
+                                      ? "text-destructive"
+                                      : "text-muted-foreground",
+                                  )}
+                                />
+                              ) : (
+                                <CircleCheck className="size-4 shrink-0 text-muted-foreground" />
                               )}
-                            />
-                          ) : (
-                            <CircleCheck className="size-4 shrink-0 text-muted-foreground" />
-                          )}
-                          <span className="truncate">
-                            {pending
-                              ? t(locale, getActionLabelKey(pending.action))
-                              : result
-                                ? t(locale, "result")
-                                : t(locale, "operatePage")}
-                          </span>
-                        </CardTitle>
-                        <CardAction className="flex items-center gap-1">
-                          {pending ? (
-                            <IconTooltip label={t(locale, "cancelRequest")}>
-                              <Button
-                                size="icon-sm"
-                                variant="ghost"
-                                aria-label={t(locale, "cancelRequest")}
-                                onClick={() => void handleCancelRequest()}
-                              >
-                                <X />
-                              </Button>
-                            </IconTooltip>
-                          ) : (
-                            result && (
-                              <>
-                                <Badge
-                                  variant={
-                                    result.action !== "operate-page"
-                                      ? "outline"
-                                      : result.status === "failed"
-                                        ? "destructive"
-                                        : result.status === "completed"
-                                          ? "secondary"
-                                          : "outline"
-                                  }
-                                >
-                                  {result.action === "operate-page"
-                                    ? t(
-                                        locale,
-                                        getPageAgentStatusLabelKey(
-                                          result.status,
-                                        ),
-                                      )
-                                    : t(
-                                        locale,
-                                        getActionLabelKey(result.action),
-                                      )}
-                                </Badge>
-                                <IconTooltip label={t(locale, "copyResult")}>
+                              <span className="truncate">
+                                {resultPending
+                                  ? t(
+                                      locale,
+                                      getActionLabelKey(resultPending.action),
+                                    )
+                                  : result
+                                    ? t(locale, "result")
+                                    : t(locale, "operatePage")}
+                              </span>
+                            </CardTitle>
+                            <CardAction className="flex items-center gap-1">
+                              {resultPending ? (
+                                <IconTooltip label={t(locale, "cancelRequest")}>
                                   <Button
                                     size="icon-sm"
                                     variant="ghost"
-                                    aria-label={t(locale, "copyResult")}
-                                    onClick={() => void handleCopyResult()}
-                                  >
-                                    <Clipboard />
-                                  </Button>
-                                </IconTooltip>
-                                <IconTooltip label={t(locale, "closeResult")}>
-                                  <Button
-                                    size="icon-sm"
-                                    variant="ghost"
-                                    aria-label={t(locale, "closeResult")}
-                                    onClick={() => {
-                                      setResult(undefined);
-                                      setPageAgentRun(undefined);
-                                    }}
+                                    aria-label={t(locale, "cancelRequest")}
+                                    onClick={() => void handleCancelRequest()}
                                   >
                                     <X />
                                   </Button>
                                 </IconTooltip>
-                              </>
-                            )
-                          )}
-                        </CardAction>
-                      </CardHeader>
-
-                      <CardContent>
-                        {pending && pending.action !== "operate-page" ? (
-                          <div
-                            className="flex min-h-20 flex-col gap-3"
-                            role="status"
-                            aria-live="polite"
-                          >
-                            <p className="text-sm text-muted-foreground">
-                              {t(locale, "processing")}
-                            </p>
-                            <div
-                              className="flex flex-col gap-2"
-                              aria-hidden="true"
-                            >
-                              <Skeleton className="h-3 w-full" />
-                              <Skeleton className="h-3 w-11/12" />
-                              <Skeleton className="h-3 w-3/5" />
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            {result && (
-                              <div className="hp-markdown text-sm leading-6">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    a: ({ children, ...props }) => (
-                                      <a
-                                        {...props}
-                                        target="_blank"
-                                        rel="noreferrer"
+                              ) : (
+                                result && (
+                                  <>
+                                    <Badge
+                                      variant={
+                                        result.action !== "operate-page"
+                                          ? "outline"
+                                          : result.status === "failed"
+                                            ? "destructive"
+                                            : result.status === "completed"
+                                              ? "secondary"
+                                              : "outline"
+                                      }
+                                    >
+                                      {result.action === "operate-page"
+                                        ? t(
+                                            locale,
+                                            getPageAgentStatusLabelKey(
+                                              result.status,
+                                            ),
+                                          )
+                                        : t(
+                                            locale,
+                                            getActionLabelKey(result.action),
+                                          )}
+                                    </Badge>
+                                    <IconTooltip
+                                      label={t(locale, "copyResult")}
+                                    >
+                                      <Button
+                                        size="icon-sm"
+                                        variant="ghost"
+                                        aria-label={t(locale, "copyResult")}
+                                        onClick={() => void handleCopyResult()}
                                       >
-                                        {children}
-                                      </a>
-                                    ),
-                                    img: () => null,
-                                  }}
-                                >
-                                  {result.content}
-                                </ReactMarkdown>
-                              </div>
-                            )}
-                            {result && pageAgentRun && (
-                              <Separator className="my-3" />
-                            )}
-                            {pageAgentRun && (
-                              <PageAgentProgressView
-                                active={pending?.action === "operate-page"}
-                                locale={locale}
-                                run={pageAgentRun}
-                                onAnswer={handlePageAgentAnswer}
-                              />
-                            )}
-                          </>
-                        )}
-                      </CardContent>
-
-                      {result &&
-                        ((result.action === "translate" && selection) ||
-                          (result.action === "polish" &&
-                            selection?.editable)) && (
-                          <CardFooter className="flex-wrap gap-2">
-                            {result.action === "translate" && selection && (
-                              <Button
-                                variant="outline"
-                                onClick={() =>
-                                  void runPageCommand(
-                                    {
-                                      type: "insert-result",
-                                      text: result.content,
-                                    },
-                                    "inserted",
-                                  )
-                                }
-                              >
-                                <PanelRight data-icon="inline-start" />
-                                {t(locale, "insertBelow")}
-                              </Button>
-                            )}
-                            {result.action === "polish" &&
-                              selection?.editable && (
-                                <Button
-                                  variant="outline"
-                                  onClick={() =>
-                                    void runPageCommand(
-                                      {
-                                        type: "replace-editable",
-                                        text: result.content,
-                                      },
-                                      "replaced",
-                                    )
-                                  }
-                                >
-                                  <Check data-icon="inline-start" />
-                                  {t(locale, "replaceField")}
-                                </Button>
+                                        <Clipboard />
+                                      </Button>
+                                    </IconTooltip>
+                                    <IconTooltip
+                                      label={t(locale, "closeResult")}
+                                    >
+                                      <Button
+                                        size="icon-sm"
+                                        variant="ghost"
+                                        aria-label={t(locale, "closeResult")}
+                                        onClick={() => {
+                                          setResult(undefined);
+                                          setPageAgentRun(undefined);
+                                        }}
+                                      >
+                                        <X />
+                                      </Button>
+                                    </IconTooltip>
+                                  </>
+                                )
                               )}
-                          </CardFooter>
-                        )}
-                    </Card>
-                  )}
+                            </CardAction>
+                          </CardHeader>
 
-                      {error && (
-                        <Alert className="hp-feedback" variant="destructive">
-                      <CircleAlert />
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                  )}
+                          <CardContent>
+                            {result && <div className="mb-2 flex justify-end"><TextExport content={result.content} filename="hyperpage-result" locale={locale} disabled={Boolean(pending)} /></div>}
+                            {resultPending &&
+                            resultPending.action !== "operate-page" ? (
+                              <div
+                                className="flex min-h-20 flex-col gap-3"
+                                role="status"
+                                aria-live="polite"
+                              >
+                                <p className="text-sm text-muted-foreground">
+                                  {t(locale, "processing")}
+                                </p>
+                                <div
+                                  className="flex flex-col gap-2"
+                                  aria-hidden="true"
+                                >
+                                  <Skeleton className="h-3 w-full" />
+                                  <Skeleton className="h-3 w-11/12" />
+                                  <Skeleton className="h-3 w-3/5" />
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                {result && (
+                                  <div className="hp-markdown text-sm leading-6">
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      components={{
+                                        a: ({ children, ...props }) => (
+                                          <a
+                                            {...props}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            {children}
+                                          </a>
+                                        ),
+                                        img: () => null,
+                                      }}
+                                    >
+                                      {result.content}
+                                    </ReactMarkdown>
+                                  </div>
+                                )}
+                                {result && pageAgentRun && (
+                                  <Separator className="my-3" />
+                                )}
+                                {pageAgentRun && (
+                                  <PageAgentProgressView
+                                    active={pending?.action === "operate-page"}
+                                    locale={locale}
+                                    run={pageAgentRun}
+                                    onAnswer={handlePageAgentAnswer}
+                                  />
+                                )}
+                              </>
+                            )}
+                          </CardContent>
 
-                      {toast && (
-                        <Alert className="hp-feedback" role="status">
-                      <CircleCheck />
-                      <AlertDescription>{toast}</AlertDescription>
-                    </Alert>
-                  )}
+                          {result && <CardFooter className="flex-col items-stretch gap-2"><ResultActions text={result.content} locale={locale} state={pageState} disabled={Boolean(pending)} onState={applyPageState} onError={notify.error} /><Button variant="outline" size="sm" disabled={Boolean(pending)} onClick={continueResult}><MessageCircleQuestion data-icon="inline-start" />{t(locale, "continueResult")}</Button></CardFooter>}
+                        </Card>
+                      )}
+
                     </section>
                   )}
                 </div>
@@ -2961,8 +3231,6 @@ export function App({ initialOpen }: AppProps) {
             </main>
           )}
         </div>
-      )}
-      {launcher}
     </>
   );
 }

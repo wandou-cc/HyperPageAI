@@ -18,8 +18,10 @@ import type {
 import {
   addPageAgentExecutionRecord,
   createDefaultSettings,
+  createUnknownCapabilities,
   getChatCompletionsUrl,
   getModelsUrl,
+  getTaskProvider,
   loadPageAgentHistory,
   loadPageWorkflows,
   loadSettings,
@@ -30,13 +32,15 @@ import {
   parseProviderCredentials,
   parseStoredSettings,
   savePageWorkflows,
+  requireModelCapability,
 } from "../shared/settings";
 
 const validProvider: ProviderConfig = {
+  protocol: "chat-completions",
   baseUrl: " https://api.example.com/v1/ ",
   apiKey: " secret ",
   model: " vision-model ",
-  supportsVision: true,
+  capabilities: createUnknownCapabilities(),
   targetLanguage: " Simplified Chinese ",
 };
 
@@ -47,10 +51,11 @@ describe("provider settings", () => {
 
   it("normalizes a valid OpenAI-compatible configuration", () => {
     expect(parseProviderConfig(validProvider)).toEqual({
+      protocol: "chat-completions",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret",
       model: "vision-model",
-      supportsVision: true,
+      capabilities: createUnknownCapabilities(),
       targetLanguage: "Simplified Chinese",
     });
   });
@@ -58,10 +63,12 @@ describe("provider settings", () => {
   it("validates credentials before a model has been selected", () => {
     expect(
       parseProviderCredentials({
+        protocol: "chat-completions",
         baseUrl: " https://api.example.com/v1/ ",
         apiKey: " secret ",
       }),
     ).toEqual({
+      protocol: "chat-completions",
       baseUrl: "https://api.example.com/v1",
       apiKey: "secret",
     });
@@ -97,6 +104,7 @@ describe("provider settings", () => {
     ).toThrow("baseUrlInvalid");
     expect(() =>
       parseProviderCredentials({
+        protocol: "chat-completions",
         baseUrl: "https://api.example.com/v1/models",
         apiKey: "secret",
       }),
@@ -114,10 +122,11 @@ describe("provider settings", () => {
 
   it("uses Chrome's interface language only for first-run locale", () => {
     expect(createDefaultSettings("zh-CN")).toEqual({
-      version: 4,
+      version: 8,
       enabled: true,
       locale: "zh_CN",
-      provider: null,
+      providers: [],
+      taskModels: { chat: null, text: null, vision: null, automation: null },
       resultDisplayMode: "floating",
       allowMultiTab: false,
     });
@@ -136,16 +145,55 @@ describe("provider settings", () => {
     const settings = await loadSettings("en-US");
 
     expect(settings).toEqual({
-      version: 4,
-      enabled: true,
-      locale: "zh_CN",
-      provider: null,
+      ...createDefaultSettings("zh-CN"),
       resultDisplayMode: "floating",
       allowMultiTab: false,
     });
     expect(browserMock.storage.local.set).toHaveBeenCalledWith({
       "hyperpage.settings": settings,
     });
+  });
+
+  it("migrates v5 profiles and assignments while leaving web search unverified", async () => {
+    const { webSearch: _search, ...capabilities } = createUnknownCapabilities();
+    const { protocol: _protocol, ...legacyProvider } = validProvider;
+    capabilities.text = { status: "supported", checkedAt: 100 };
+    const settings = createDefaultSettings("en");
+    const legacy = { ...settings, version: 5, providers: [{ id: "one", name: "One", config: { ...legacyProvider, capabilities } }], taskModels: { chat: "one", text: "one", vision: null, automation: null } };
+    browserMock.storage.local.get.mockResolvedValue({ "hyperpage.settings": legacy });
+    const migrated = await loadSettings("en");
+    expect(migrated).toMatchObject({ version: 8, taskModels: legacy.taskModels, providers: [{ config: { protocol: "chat-completions", capabilities: { text: capabilities.text, webSearch: { status: "unknown" } } } }] });
+    expect(browserMock.storage.local.set).toHaveBeenCalledWith({ "hyperpage.settings": migrated });
+    const provider = migrated.providers[0];
+    if (!provider) throw new Error("Missing migrated provider");
+    expect(() => requireModelCapability(provider.config, "webSearch")).toThrow("webSearchCheckRequired");
+    expect(migrated).not.toHaveProperty("chunkedReading");
+  });
+
+  it("migrates v6 profiles without losing their credentials or task assignments", async () => {
+    const { protocol: _protocol, ...config } = parseProviderConfig(validProvider);
+    const legacy = { ...createDefaultSettings("en"), version: 6, chunkedReading: true, providers: [{ id: "one", name: "One", config }], taskModels: { chat: "one", text: "one", vision: null, automation: "one" } };
+    browserMock.storage.local.get.mockResolvedValue({ "hyperpage.settings": legacy });
+    const migrated = await loadSettings("en");
+    const { chunkedReading: _removed, ...retained } = legacy;
+    expect(migrated).toEqual({ ...retained, version: 8, providers: [{ id: "one", name: "One", config: { ...config, protocol: "chat-completions" } }] });
+    expect(browserMock.storage.local.set).toHaveBeenCalledWith({ "hyperpage.settings": migrated });
+  });
+
+  it.each(["chat-completions", "responses", "anthropic", "gemini"] as const)("persists an explicit %s protocol", (protocol) => {
+    const config = parseProviderConfig({ ...validProvider, protocol });
+    const settings = { ...createDefaultSettings("en"), providers: [{ id: "one", name: "One", config }] };
+    expect(parseStoredSettings(settings).providers[0]?.config.protocol).toBe(protocol);
+    expect(() => parseProviderConfig({ ...config, protocol: "unknown" })).toThrow("settingsInvalid");
+    const { protocol: _protocol, ...withoutProtocol } = config;
+    expect(() => parseStoredSettings({ ...settings, providers: [{ ...settings.providers[0], config: withoutProtocol }] })).toThrow("settingsInvalid");
+  });
+
+  it("migrates v7 settings while preserving providers and removing the chunk preference", async () => {
+    const current = { ...createDefaultSettings("en"), providers: [{ id: "one", name: "One", config: parseProviderConfig(validProvider) }], taskModels: { chat: "one", text: "one", vision: null, automation: null } };
+    browserMock.storage.local.get.mockResolvedValue({ "hyperpage.settings": { ...current, version: 7, chunkedReading: true } });
+    expect(await loadSettings("en")).toEqual(current);
+    expect(browserMock.storage.local.set).toHaveBeenCalledWith({ "hyperpage.settings": current });
   });
 
   it("migrates version 2 settings without changing the result destination", async () => {
@@ -161,10 +209,7 @@ describe("provider settings", () => {
     const settings = await loadSettings("zh-CN");
 
     expect(settings).toEqual({
-      version: 4,
-      enabled: true,
-      locale: "en",
-      provider: null,
+      ...createDefaultSettings("en-US"),
       resultDisplayMode: "inline",
       allowMultiTab: false,
     });
@@ -183,10 +228,8 @@ describe("provider settings", () => {
     };
 
     expect(parseStoredSettings(settings)).toEqual({
-      version: 4,
+      ...createDefaultSettings("en-US"),
       enabled: false,
-      locale: "en",
-      provider: null,
       resultDisplayMode: "floating",
       allowMultiTab: false,
     });
@@ -236,13 +279,103 @@ describe("provider settings", () => {
         allowMultiTab: true,
       }),
     ).toEqual({
-      version: 4,
-      enabled: true,
-      locale: "en",
-      provider: null,
+      ...createDefaultSettings("en-US"),
       resultDisplayMode: "floating",
       allowMultiTab: true,
     });
+  });
+
+  it("migrates the existing model without inventing capability test results", () => {
+    const settings = parseStoredSettings({
+      version: 4,
+      enabled: true,
+      locale: "en",
+      resultDisplayMode: "inline",
+      allowMultiTab: true,
+      provider: {
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "secret",
+        model: "old-model",
+        targetLanguage: "English",
+        supportsVision: true,
+      },
+    });
+    expect(settings.taskModels).toEqual({
+      chat: "default",
+      text: "default",
+      vision: "default",
+      automation: "default",
+    });
+    expect(getTaskProvider(settings, "vision")).toMatchObject({
+      model: "old-model",
+      capabilities: {
+        text: { status: "unknown" },
+        vision: { status: "supported", checkedAt: null },
+      },
+    });
+    expect(settings.resultDisplayMode).toBe("inline");
+    expect(settings.allowMultiTab).toBe(true);
+  });
+
+  it("rejects dangling task assignments, duplicated profiles and malformed legacy credentials", () => {
+    const base = createDefaultSettings("en");
+    expect(() =>
+      parseStoredSettings({
+        ...base,
+        taskModels: { ...base.taskModels, chat: "missing" },
+      }),
+    ).toThrow("settingsInvalid");
+    const profile = {
+      id: "same",
+      name: "Text",
+      config: parseProviderConfig(validProvider),
+    };
+    expect(() =>
+      parseStoredSettings({ ...base, providers: [profile, profile] }),
+    ).toThrow("settingsInvalid");
+    expect(() =>
+      parseStoredSettings({
+        locale: "en",
+        provider: { baseUrl: "https://api.example.com", apiKey: 42 },
+      }),
+    ).toThrow("settingsInvalid");
+  });
+
+  it("uses only the assigned model", () => {
+    const first = {
+      id: "one",
+      name: "One",
+      config: parseProviderConfig(validProvider),
+    };
+    const second = {
+      id: "two",
+      name: "Two",
+      config: {
+        ...first.config,
+        model: "other-model",
+        capabilities: {
+          ...createUnknownCapabilities(),
+          streaming: {
+            status: "failed" as const,
+            checkedAt: 100,
+            error: "apiStreamIncomplete",
+          },
+        },
+      },
+    };
+    const settings = parseStoredSettings({
+      ...createDefaultSettings("en"),
+      providers: [first, second],
+      taskModels: { chat: "two", text: "one", vision: null, automation: null },
+    });
+    const selected = getTaskProvider(settings, "chat");
+    expect(selected?.model).toBe("other-model");
+    expect(getTaskProvider(settings, "vision")).toBeNull();
+    if (!selected) throw new Error("Expected assigned provider");
+    expect(() => requireModelCapability(selected, "vision")).toThrow(
+      "visionRequired",
+    );
+    expect(() => requireModelCapability(selected, "text")).not.toThrow();
   });
 });
 
@@ -272,7 +405,7 @@ describe("saved page workflows", () => {
       ],
     };
 
-    expect(parseStoredPageWorkflows(stored)).toEqual(stored);
+    expect(parseStoredPageWorkflows(stored)).toEqual({ version: 2, workflows: stored.workflows.map((workflow) => ({ ...workflow, allowedOrigins: [] })) });
   });
 
   it("rejects duplicate ids and unnormalized workflow text", () => {
@@ -295,13 +428,13 @@ describe("saved page workflows", () => {
 
   it("persists the complete workflow collection as one revision", async () => {
     const workflows = [
-      { id: "workflow-1", name: "Search", task: "Search for HyperPage" },
+      { id: "workflow-1", name: "Search", task: "Search for HyperPage", allowedOrigins: [] },
     ];
 
     await savePageWorkflows(workflows);
 
     expect(browserMock.storage.local.set).toHaveBeenCalledWith({
-      "hyperpage.pageWorkflows": { version: 1, workflows },
+      "hyperpage.pageWorkflows": { version: 2, workflows },
     });
   });
 });

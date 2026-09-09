@@ -8,10 +8,11 @@ import {
 } from "../shared/prompts";
 
 const provider: ProviderConfig = {
+  protocol: "chat-completions",
   baseUrl: "https://api.example.com/v1",
   apiKey: "secret",
   model: "model",
-  supportsVision: true,
+  capabilities: { text: { status: "unknown" }, streaming: { status: "unknown" }, vision: { status: "supported", checkedAt: null }, tools: { status: "unknown" }, webSearch: { status: "unknown" } },
   targetLanguage: "Simplified Chinese",
 };
 
