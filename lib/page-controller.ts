@@ -34,9 +34,7 @@ import { containsSensitiveField, getVisibleText, isSensitiveElement } from "../s
 import { PageReading } from "./page-reading";
 import { PageResources } from "./page-resources";
 import { resourceCommandSchema, type ResourceContentRequest, type ResourceResult } from "../shared/page-resources";
-import { PageTranslation } from "./page-translation";
 import { checkCaptureArea } from "./capture-guard";
-import type { PageTranslationCommand } from "../shared/page-translation";
 import { assertSiteAllowed, parseSiteOrigins } from "../shared/task-templates";
 import { PageEditing, setEditableValue } from "./page-editing";
 import { formatError, t } from "../entrypoints/sidepanel/translations";
@@ -50,7 +48,6 @@ interface InlineActionTarget {
 export class PageController {
   private reading = new PageReading();
   private resources = new PageResources();
-  private translation = new PageTranslation(this.reading);
   private editing = new PageEditing();
   private agentElements = new Map<number, HTMLElement>();
   private agentLastUpdateTime = 0;
@@ -722,7 +719,7 @@ export class PageController {
 
   // Receives typed commands from the extension background worker.
   private handleMessage = (
-    message: ContentRequest | AgentContentRequest | ReadingContentRequest | EditingContentRequest | ResourceContentRequest | { target: "translation-content"; command: PageTranslationCommand },
+    message: ContentRequest | AgentContentRequest | ReadingContentRequest | EditingContentRequest | ResourceContentRequest,
     _sender: Browser.runtime.MessageSender,
     sendResponse: (response?: ContentResponse | AgentContentResponse | ReadingContentResponse | CommandResult<EditablePreview | PageState | ResourceResult | null>) => void,
   ): true | undefined => {
@@ -735,11 +732,6 @@ export class PageController {
         (error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
       );
       return true;
-    }
-    if (message.target === "translation-content") {
-      try { sendResponse({ ok: true, data: this.translation.execute(message.command) }); }
-      catch (error) { sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
-      return undefined;
     }
     if (message.target === "editing-content") {
       try { sendResponse({ ok: true, data: this.executeEditing(message.command) }); }
@@ -1606,7 +1598,6 @@ export class PageController {
 
   // Releases every observer, event listener, and DOM node owned by this controller.
   destroy(): void {
-    this.translation.restore();
     this.reading.clear();
     this.editing.destroy();
     this.resources.destroy();

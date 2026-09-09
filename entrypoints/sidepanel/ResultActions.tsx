@@ -133,37 +133,49 @@ export function ResultActions({
   }
 
   const blocked = disabled || busy;
+  const insertBelowDisabled = blocked || !state.selection || preview !== null;
+  const editFieldDisabled =
+    blocked || !state.selection?.editable || preview !== null;
   return (
     <div className="flex w-full min-w-0 flex-col gap-2">
       <div className="flex flex-wrap gap-1">
-        <IconTooltip label={t(locale, "insertBelow")}>
+        <IconTooltip
+          label={t(locale, "insertBelowHint")}
+          disabled={insertBelowDisabled}
+        >
           <Button
             size="icon-xs"
             variant="ghost"
             aria-label={t(locale, "insertBelow")}
-            disabled={blocked || !state.selection || preview !== null}
+            disabled={insertBelowDisabled}
             onClick={() => void insertBelow()}
           >
             <PanelBottom />
           </Button>
         </IconTooltip>
-        <IconTooltip label={t(locale, "replaceField")}>
+        <IconTooltip
+          label={t(locale, "replaceFieldHint")}
+          disabled={editFieldDisabled}
+        >
           <Button
             size="icon-xs"
             variant="ghost"
             aria-label={t(locale, "replaceField")}
-            disabled={blocked || !state.selection?.editable || preview !== null}
+            disabled={editFieldDisabled}
             onClick={() => void prepare("replace")}
           >
             <Replace />
           </Button>
         </IconTooltip>
-        <IconTooltip label={t(locale, "insertAtCursor")}>
+        <IconTooltip
+          label={t(locale, "insertAtCursorHint")}
+          disabled={editFieldDisabled}
+        >
           <Button
             size="icon-xs"
             variant="ghost"
             aria-label={t(locale, "insertAtCursor")}
-            disabled={blocked || !state.selection?.editable || preview !== null}
+            disabled={editFieldDisabled}
             onClick={() => void prepare("insert")}
           >
             <TextCursorInput />

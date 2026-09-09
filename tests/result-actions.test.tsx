@@ -19,6 +19,50 @@ afterEach(() => {
 });
 
 describe("result editing controls", () => {
+  it("explains where each result action applies", async () => {
+    const state: PageState = {
+      selection: null,
+      selectionRevision: 1,
+      selecting: false,
+      canUndoReplace: false,
+      canRemoveInsertion: false,
+    };
+    render(
+      <TooltipProvider>
+        <ResultActions
+          text="New text"
+          locale="en"
+          state={state}
+          disabled={false}
+          onState={vi.fn()}
+          onError={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+
+    const cases = [
+      ["Insert below", "Insert this result below the selected page element."],
+      [
+        "Replace field",
+        "Replace all content in the selected input area with this result.",
+      ],
+      [
+        "Insert at cursor",
+        "Insert this result at the cursor in the selected input area.",
+      ],
+    ] as const;
+    for (const [buttonName, hint] of cases) {
+      const button = screen.getByRole("button", { name: buttonName });
+      expect(button).toBeDisabled();
+      const trigger = button.parentElement;
+      if (!trigger) throw new Error("Missing disabled tooltip trigger");
+      fireEvent.mouseEnter(trigger);
+      expect(await screen.findByText(hint)).toBeVisible();
+      fireEvent.mouseLeave(trigger);
+      await waitFor(() => expect(screen.queryByText(hint)).toBeNull());
+    }
+  });
+
   it("shows differences and only sends the approved preview token after confirmation", async () => {
     const field = document.createElement("textarea");
     field.value = "Old text";

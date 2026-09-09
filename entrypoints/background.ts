@@ -49,7 +49,6 @@ import type {
   StoredSettings,
 } from "../shared/messages";
 import { getContextCitations } from "../shared/conversations";
-import { parseTranslationRequest, translateReading, type PageTranslationResult, type TranslatePageRequest } from "../shared/page-translation";
 import { buildTurnContent, parseContextSnapshot } from "../shared/conversations";
 import { SOURCE_CHAT_PORT, type SourceChatEvent } from "../shared/source-chat";
 import { RESOURCE_PORT, resourceRequestSchema, type ResourceResult } from "../shared/page-resources";
@@ -94,6 +93,7 @@ interface PendingPageAgentQuestion {
 }
 const pendingPageAgentQuestions = new Map<string, PendingPageAgentQuestion>();
 const EXTENSION_TOGGLE_MENU_ID = "hyperpage.toggle-enabled";
+const REMOVED_PAGE_TRANSLATION_STORAGE_KEY = "hyperpage.translationTerms";
 const TAB_READY_TIMEOUT_MS = 30_000;
 
 function isAbortError(error: unknown): boolean {
@@ -1124,24 +1124,6 @@ async function runChat(
   }
 }
 
-async function runPageTranslation(tab: ActiveTab, request: TranslatePageRequest, requestId: string): Promise<PageTranslationResult> {
-  const controller = new AbortController();
-  activeRequests.set(requestId, controller);
-  try {
-    const options = parseTranslationRequest(request);
-    const settings = await loadEnabledSettings();
-    const provider = getTaskProvider(settings, "text");
-    if (!provider) throw new Error("providerRequired");
-    const page = await sendReadingCommand(tab.id, { type: "get-reading-selection", selection: options.selection });
-    return await translateReading({ page, language: options.language, terms: options.terms, signal: controller.signal,
-      generate: (system, content) => callStreamingModel(provider, [{ role: "system", content: system }, { role: "user", content }], controller.signal),
-    });
-  } catch (error) {
-    if (isAbortError(error)) throw new Error("requestCancelled");
-    throw error;
-  } finally { activeRequests.delete(requestId); }
-}
-
 async function sendReadingCommand<C extends PageReadingCommand>(
   tabId: number, command: C,
 ): Promise<PageReadingResults[C["type"]]> {
@@ -1487,13 +1469,6 @@ export async function handleBackgroundRequest(
       await loadEnabledSettings();
       return { ok: true, data: await readYouTubeCaptions(tab.id, request.videoId) };
     }
-    if (request.type === "translate-page") {
-      return { ok: true, data: await runPageTranslation(tab, request.request, request.requestId) };
-    }
-    if (request.type === "translation-command") {
-      await loadEnabledSettings();
-      return await browser.tabs.sendMessage(tab.id, { target: "translation-content", command: request.command }, { frameId: 0 }) as CommandResult<null>;
-    }
     if (request.type === "editing-command") {
       await loadEnabledSettings();
       return await browser.tabs.sendMessage(tab.id, { target: "editing-content", command: request.command }, { frameId: 0 }) as CommandResult<unknown>;
@@ -1638,6 +1613,7 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onInstalled.addListener(() => {
+    void browser.storage.local.remove(REMOVED_PAGE_TRANSLATION_STORAGE_KEY);
     void loadSettings(browser.i18n.getUILanguage()).then(
       createExtensionToggleMenu,
     );

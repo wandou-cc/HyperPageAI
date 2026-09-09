@@ -1,6 +1,5 @@
 import { message as notify, Toaster } from "@/components/ui/toast";
 import {
-  ArrowLeft,
   BookmarkPlus,
   BookOpen,
   Captions,
@@ -27,7 +26,6 @@ import {
   MousePointer2,
   Paperclip,
   Pencil,
-  Plus,
   Play,
   RefreshCw,
   ScanText,
@@ -42,7 +40,6 @@ import {
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -160,8 +157,7 @@ import { PromptTemplates } from "./PromptTemplates";
 import { ResultActions } from "./ResultActions";
 import { WritingTools } from "./WritingTools";
 import { AiComposer } from "./AiComposer";
-import { PageTranslationTools, type TranslationPreview } from "./PageTranslationTools";
-import type { PageTranslationCommand, PageTranslationResult, TranslationDisplayMode, TranslationTerm } from "../../shared/page-translation";
+import { ConversationActions } from "./ConversationActions";
 import { formatError, type MessageKey, t } from "./translations";
 import { IconTooltip } from "./ui";
 import { WebSearchToggle } from "./WebSearchToggle";
@@ -294,13 +290,11 @@ async function sendBackgroundRequest<T>(
 
 // Resolves the localized command label used for progress and result headings.
 function getActionLabelKey(
-  action: AiAction | "chat" | "operate-page" | "translate-page",
+  action: AiAction | "chat" | "operate-page",
 ): MessageKey {
   switch (action) {
     case "translate":
       return "translate";
-    case "translate-page":
-      return "pageTranslation";
     case "explain":
       return "explain";
     case "summarize":
@@ -617,7 +611,7 @@ export function App({ initialOpen }: AppProps) {
   const [result, setResult] = useState<AiResult>();
   const [pending, setPending] = useState<{
     requestId: string;
-    action: AiAction | "chat" | "operate-page" | "translate-page";
+    action: AiAction | "chat" | "operate-page";
   }>();
   const [customPrompt, setCustomPrompt] = useState("");
   const [toolPrompt, setToolPrompt] = useState("");
@@ -637,15 +631,8 @@ export function App({ initialOpen }: AppProps) {
   const [contextElements, setContextElements] = useState<PageReadingSnapshot[]>([]);
   const [fileSnapshot, setFileSnapshot] = useState<FileReadingSnapshot | null>(null);
   const [fileBlockIds, setFileBlockIds] = useState<string[]>([]);
-  const selectedReadingSnapshot = useMemo(() => {
-    if (!readingSnapshot) return null;
-    const selected = new Set(readingBlockIds);
-    return { ...readingSnapshot, blocks: readingSnapshot.blocks.filter((block) => selected.has(block.id)) };
-  }, [readingSnapshot, readingBlockIds]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const contextSelectionRevision = useRef<number | null>(null);
-  const [translationPreview, setTranslationPreview] = useState<TranslationPreview | null>(null);
-  const [translationMode, setTranslationMode] = useState<TranslationDisplayMode | null>(null);
   const [pageTask, setPageTask] = useState("");
   const [taskSites, setTaskSites] = useState("");
   const [workflows, setWorkflows] = useState<SavedPageWorkflow[]>([]);
@@ -1391,34 +1378,6 @@ export function App({ initialOpen }: AppProps) {
     finally { setReadingLoading(false); }
   }
 
-  async function handleTranslatePage(language: string, terms: TranslationTerm[]): Promise<void> {
-    if (pending || readingLoading || !selectedReadingSnapshot) return;
-    const source = selectedReadingSnapshot;
-    const requestId = crypto.randomUUID();
-    setPending({ requestId, action: "translate-page" });
-    setTranslationPreview(null);
-
-    try {
-      const result = await sendBackgroundRequest<PageTranslationResult>({ target: "background", type: "translate-page", requestId, request: {
-        selection: { snapshotId: source.id, blockIds: source.blocks.map((block) => block.id) },
-        language, terms,
-      } });
-      setTranslationPreview({ source, result });
-    } catch (failure) { notify.error(formatError(locale, failure)); }
-    finally { setPending(undefined); }
-  }
-
-  async function handleTranslationCommand(command: PageTranslationCommand): Promise<void> {
-    setReadingLoading(true);
-
-    try {
-      await sendBackgroundRequest<null>({ target: "background", type: "translation-command", command });
-      if (command.type === "restore-translation") { setTranslationMode(null); setTranslationPreview(null); }
-      else setTranslationMode(command.type === "apply-translation" ? "bilingual" : command.mode);
-    } catch (failure) { notify.error(formatError(locale, failure)); }
-    finally { setReadingLoading(false); }
-  }
-
   // Sends one chat turn with the explicitly selected page-context mode.
   async function handleChatSubmit(pagePrompt?: string): Promise<void> {
     if (pending || readingLoading) return;
@@ -1532,7 +1491,6 @@ export function App({ initialOpen }: AppProps) {
   async function handleClearChat(): Promise<void> {
     if (pending || readingLoading) return;
     try {
-      if (translationMode) await sendBackgroundRequest<null>({ target: "background", type: "translation-command", command: { type: "restore-translation" } });
       await sendBackgroundRequest<null>({ target: "background", type: "reading-command", command: { type: "clear-reading" } });
     } catch (clearError) {
       notify.error(formatError(locale, clearError));
@@ -1552,9 +1510,6 @@ export function App({ initialOpen }: AppProps) {
     setVideoBlockIds([]);
     setFileSnapshot(null);
     setFileBlockIds([]);
-    setTranslationMode(null);
-    setTranslationPreview(null);
-
   }
 
   function handleLoadConversation(record: SavedConversation): void {
@@ -1920,7 +1875,7 @@ export function App({ initialOpen }: AppProps) {
       !pageReady,
   );
   const toolPromptDisabled = actionsDisabled || Boolean(selection && !canUseTextAi);
-  const resultPending = pending?.action === "chat" || pending?.action === "translate-page" ? undefined : pending;
+  const resultPending = pending?.action === "chat" ? undefined : pending;
   const feedbackAction = resultPending?.action ?? result?.action;
   const feedbackTab = feedbackAction === "write"
     ? "writing"
@@ -2063,15 +2018,15 @@ export function App({ initialOpen }: AppProps) {
                 className="min-h-0 flex-1 gap-0 overflow-hidden"
               >
                 <div
-                  className="shrink-0 border-b bg-background p-2"
+                  className="shrink-0 bg-background p-2"
                   data-main-navigation
                 >
-                  <TabsList className="grid w-full grid-cols-5">
-                    <TabsTrigger value="chat">{t(locale, "navChat")}</TabsTrigger>
-                    <TabsTrigger value="documents">{t(locale, "navDocuments")}</TabsTrigger>
-                    <TabsTrigger value="writing">{t(locale, "navWriting")}</TabsTrigger>
-                    <TabsTrigger value="tools">{t(locale, "navTools")}</TabsTrigger>
-                    <TabsTrigger value="operate">{t(locale, "navTasks")}</TabsTrigger>
+                  <TabsList className="grid w-full grid-cols-5 group-data-horizontal/tabs:h-12">
+                    <TabsTrigger value="chat" className="min-w-0 flex-col gap-0 text-xs"><MessageSquareText /><span className="w-full truncate">{t(locale, "navChat")}</span></TabsTrigger>
+                    <TabsTrigger value="documents" className="min-w-0 flex-col gap-0 text-xs"><BookOpen /><span className="w-full truncate">{t(locale, "navDocuments")}</span></TabsTrigger>
+                    <TabsTrigger value="writing" className="min-w-0 flex-col gap-0 text-xs"><Pencil /><span className="w-full truncate">{t(locale, "navWriting")}</span></TabsTrigger>
+                    <TabsTrigger value="tools" className="min-w-0 flex-col gap-0 text-xs"><WandSparkles /><span className="w-full truncate">{t(locale, "navTools")}</span></TabsTrigger>
+                    <TabsTrigger value="operate" className="min-w-0 flex-col gap-0 text-xs"><Bot /><span className="w-full truncate">{t(locale, "navTasks")}</span></TabsTrigger>
                   </TabsList>
                 </div>
 
@@ -2330,13 +2285,6 @@ export function App({ initialOpen }: AppProps) {
                         <AiActionButton icon={Image} label={t(locale, "imagePrompt")} disabled={actionsDisabled || !canAnalyzeImage} onClick={() => void runAi({ action: "image-prompt" })} />
                       </div>
                     </section>
-                    <Collapsible className="flex flex-col gap-2 border-t pt-3">
-                      <CollapsibleTrigger render={<Button variant="ghost" className="justify-start" />}><Languages data-icon="inline-start" />{t(locale, "translationWorkspace")}<ChevronDown data-icon="inline-end" className="ml-auto" /></CollapsibleTrigger>
-                      <CollapsibleContent className="flex flex-col gap-3">
-                        <ReadingContext locale={locale} snapshot={readingSnapshot} selectedIds={readingBlockIds} loading={readingLoading} disabled={Boolean(pending)} onRead={() => void handleReadPage()} onSelect={setReadingBlockIds} onPrompt={(prompt) => { setChatContext("page"); setCustomPrompt(prompt); setMainTab("chat"); setAttachmentExpanded(true); }} />
-                        <PageTranslationTools locale={locale} source={selectedReadingSnapshot} targetLanguage={getTaskProvider(settings, "text")?.targetLanguage ?? ""} preview={translationPreview} mode={translationMode} disabled={Boolean(pending) || readingLoading} running={pending?.action === "translate-page"} onRun={(language, terms) => void handleTranslatePage(language, terms)} onCommand={(command) => void handleTranslationCommand(command)} onCancel={() => void handleCancelRequest()} onError={notify.error} />
-                      </CollapsibleContent>
-                    </Collapsible>
                   </TabsContent>
                   <TabsContent value="chat" keepMounted className="flex min-h-0 flex-col data-[hidden]:hidden">
                     <section
@@ -2352,18 +2300,14 @@ export function App({ initialOpen }: AppProps) {
                         </h2>
                         <div className="ml-auto flex flex-wrap items-center gap-1">
                           {chatTurns.length > 0 && <TextExport locale={locale} filename="hyperpage-conversation" disabled={Boolean(pending)} content={() => conversationToMarkdown(chatTurns, { user: t(locale, "userMessage"), assistant: t(locale, "assistant"), incomplete: t(locale, "generationIncomplete") })} />}
-                          <Button size="sm" variant="ghost" aria-expanded={conversationLibraryOpen} disabled={Boolean(pending)} onClick={() => setConversationLibraryOpen((open) => !open)}>{conversationLibraryOpen ? <ArrowLeft data-icon="inline-start" /> : <HistoryIcon data-icon="inline-start" />}{t(locale, conversationLibraryOpen ? "backToConversation" : "conversationHistory")}</Button>
-                          <IconTooltip label={t(locale, "newConversation")}>
-                            <Button
-                              size="icon-xs"
-                              variant="ghost"
-                              aria-label={t(locale, "newConversation")}
-                              disabled={Boolean(pending) || readingLoading}
-                              onClick={handleClearChat}
-                            >
-                              <Plus />
-                            </Button>
-                          </IconTooltip>
+                          <ConversationActions
+                            locale={locale}
+                            libraryOpen={conversationLibraryOpen}
+                            disabled={Boolean(pending)}
+                            newDisabled={Boolean(pending) || readingLoading}
+                            onToggleLibrary={() => setConversationLibraryOpen((open) => !open)}
+                            onNew={() => void handleClearChat()}
+                          />
                         </div>
                       </div>
 
@@ -2452,10 +2396,36 @@ export function App({ initialOpen }: AppProps) {
                                         {message.role === "assistant" &&
                                           message.status !== "streaming" && (
                                             <MessageFooter className="flex-wrap gap-1">
-                                              <IconTooltip label={t(locale, "regenerateResponse")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "regenerateResponse")} disabled={Boolean(pending) || readingLoading} onClick={() => {
-                                                const turn = chatTurns[message.turnIndex];
-                                                if (turn) void sendConversationTurn(turn.prompt, turn.snapshot, turn.webSearch === true, message.turnIndex, true);
-                                              }}><RefreshCw /></Button></IconTooltip>
+                                              <div className="flex shrink-0 items-center gap-1" data-response-actions>
+                                                <IconTooltip label={t(locale, "regenerateResponse")}><Button size="icon-xs" variant="ghost" aria-label={t(locale, "regenerateResponse")} disabled={Boolean(pending) || readingLoading} onClick={() => {
+                                                  const turn = chatTurns[message.turnIndex];
+                                                  if (turn) void sendConversationTurn(turn.prompt, turn.snapshot, turn.webSearch === true, message.turnIndex, true);
+                                                }}><RefreshCw /></Button></IconTooltip>
+                                                {message.content && (
+                                                  <IconTooltip
+                                                    label={t(
+                                                      locale,
+                                                      "copyResponse",
+                                                    )}
+                                                  >
+                                                    <Button
+                                                      size="icon-xs"
+                                                      variant="ghost"
+                                                      aria-label={t(
+                                                        locale,
+                                                        "copyResponse",
+                                                      )}
+                                                      onClick={() =>
+                                                        void handleCopyChatMessage(
+                                                          answerToMarkdown(message.content, message.citations ?? []),
+                                                        )
+                                                      }
+                                                    >
+                                                      <Copy />
+                                                    </Button>
+                                                  </IconTooltip>
+                                                )}
+                                              </div>
                                               {message.content && <TextExport content={() => answerToMarkdown(message.content, message.citations ?? [])} filename="hyperpage-answer" locale={locale} disabled={Boolean(pending)} />}
                                               {message.content && <ResultActions text={message.content} locale={locale} state={pageState} disabled={Boolean(pending)} onState={applyPageState} onError={notify.error} />}
                                               {message.status !== "complete" &&
@@ -2470,30 +2440,6 @@ export function App({ initialOpen }: AppProps) {
                                                     )}
                                                   </span>
                                                 )}
-                                              {message.content && (
-                                                <IconTooltip
-                                                  label={t(
-                                                    locale,
-                                                    "copyResponse",
-                                                  )}
-                                                >
-                                                  <Button
-                                                    size="icon-xs"
-                                                    variant="ghost"
-                                                    aria-label={t(
-                                                      locale,
-                                                      "copyResponse",
-                                                    )}
-                                                    onClick={() =>
-                                                      void handleCopyChatMessage(
-                                                        answerToMarkdown(message.content, message.citations ?? []),
-                                                      )
-                                                    }
-                                                  >
-                                                    <Copy />
-                                                  </Button>
-                                                </IconTooltip>
-                                              )}
                                             </MessageFooter>
                                           )}
                                       </MessageContent>
@@ -2509,7 +2455,7 @@ export function App({ initialOpen }: AppProps) {
                         </MessageScrollerProvider>
                       ) : <Empty className="min-h-0 flex-1"><EmptyHeader><EmptyMedia variant="icon"><MessageSquareText /></EmptyMedia><EmptyTitle>{t(locale, "newConversation")}</EmptyTitle></EmptyHeader></Empty>}
 
-                      <div className="flex max-h-[60%] shrink-0 flex-col gap-2 overflow-y-auto border-t bg-background p-3" data-chat-composer>
+                      <div className="flex max-h-[60%] shrink-0 flex-col gap-2 overflow-y-auto bg-background p-3" data-chat-composer>
                       <input ref={fileInputRef} type="file" accept=".txt,.md,.markdown,text/plain,text/markdown" className="hidden" aria-label={t(locale, "chooseTextFile")} disabled={Boolean(pending) || readingLoading} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void handleTextFile(file); }} />
 
                       {editingTurnIndex !== null ? (

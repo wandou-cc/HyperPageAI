@@ -124,6 +124,7 @@ const browserMock = vi.hoisted(() => ({
   storage: {
     local: {
       get: vi.fn(),
+      remove: vi.fn(),
       set: vi.fn(),
     },
     onChanged: {
@@ -261,6 +262,9 @@ describe("extension action menu", () => {
     handleInstalled();
 
     await vi.waitFor(() => {
+      expect(browserMock.storage.local.remove).toHaveBeenCalledWith(
+        "hyperpage.translationTerms",
+      );
       expect(browserMock.contextMenus.create).toHaveBeenCalledWith({
         id: "hyperpage.toggle-enabled",
         title: "Enable HyperPage on webpages",
@@ -1289,23 +1293,6 @@ describe("streaming conversation", () => {
     } }, sourceTab)).resolves.toMatchObject({ ok: true });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1].body)).messages.at(-1).content).toContain(page.blocks[0]?.text);
-  });
-
-  it("translates the requested snapshot without writing to the page before confirmation", async () => {
-    browserMock.storage.local.get.mockResolvedValue({ "hyperpage.settings": enabledSettings });
-    browserMock.tabs.sendMessage.mockResolvedValue({ ok: true, data: { id: "source", title: "Article", url: "https://example.com", blocks: [{ id: "1.1", text: "Original", heading: "", headingLevel: null }] } });
-    const fetchMock = vi.fn().mockResolvedValue(createSseResponse([
-      `data: ${JSON.stringify({ choices: [{ delta: { content: '[{"id":"0","text":"Translation"}]' }, finish_reason: "stop" }] })}\n\n`, "data: [DONE]\n\n",
-    ]));
-    vi.stubGlobal("fetch", fetchMock);
-    const result = await handleBackgroundRequest({ target: "background", type: "translate-page", requestId: "translate", request: { selection: { snapshotId: "source", blockIds: ["1.1"] }, language: "English", terms: [] } }, sourceTab);
-    expect(result).toEqual({ ok: true, data: { snapshotId: "source", translations: [{ blockId: "1.1", text: "Translation" }] } });
-    expect(browserMock.tabs.sendMessage.mock.calls.some((call) => call[1]?.target === "translation-content")).toBe(false);
-    if (!result.ok) throw new Error("Missing translation result");
-    browserMock.tabs.sendMessage.mockResolvedValue({ ok: true, data: null });
-    const command = { type: "apply-translation" as const, result: { snapshotId: "source", translations: [{ blockId: "1.1", text: "Translation" }] } };
-    await expect(handleBackgroundRequest({ target: "background", type: "translation-command", command }, sourceTab)).resolves.toEqual({ ok: true, data: null });
-    expect(browserMock.tabs.sendMessage).toHaveBeenLastCalledWith(42, { target: "translation-content", command }, { frameId: 0 });
   });
 
   it("rejects inactive source tabs and tab switches during screenshot capture", async () => {

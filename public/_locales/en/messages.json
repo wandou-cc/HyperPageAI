@@ -3,7 +3,7 @@
     "message": "HyperPage AI"
   },
   "extensionDescription": {
-    "message": "Process selected content with AI or describe a task to operate webpages."
+    "message": "Read webpages, PDFs and YouTube captions, translate selections, write, analyze images and automate page tasks with your AI models."
   },
   "contextMenuEnable": {
     "message": "Enable HyperPage on webpages"

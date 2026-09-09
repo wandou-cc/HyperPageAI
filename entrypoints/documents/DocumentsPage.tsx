@@ -217,25 +217,39 @@ export function DocumentsPage({ embedded = false }: { embedded?: boolean }) {
       <span className="text-sm text-muted-foreground">{t(locale, "documents")}</span>
       <IconTooltip label={t(locale, "settings")}><Button className="ml-auto" size="icon-sm" variant="ghost" aria-label={t(locale, "settings")} onClick={() => { void request({ target: "background", type: "open-settings" }).catch((error) => notify.error(formatError(locale, error))); }}><Settings /></Button></IconTooltip>
     </header>}
-    <div className="flex shrink-0 flex-wrap items-center gap-2">
-      <input ref={fileInput} type="file" accept=".pdf,.txt,.md,.markdown,image/png,image/jpeg,image/webp,image/gif,image/avif" className="hidden" aria-label={t(locale, "openLocalResource")} disabled={busy} onChange={(event) => {
-        const file = event.target.files?.[0]; event.target.value = ""; if (file) void open(file);
-      }} />
-      <IconTooltip label={t(locale, "openLocalResource")}><Button size="icon-sm" variant="outline" aria-label={t(locale, "openLocalResource")} disabled={busy} onClick={() => fileInput.current?.click()}><FileUp /></Button></IconTooltip>
-      {embedded && <IconTooltip label={t(locale, "pageResources")}><Button size="icon-sm" variant="ghost" aria-label={t(locale, "pageResources")} aria-expanded={browsing} disabled={busy} onClick={() => { setBrowsing(!browsing); if (!browsing) void scan(); }}><FolderOpen /></Button></IconTooltip>}
-      {source && <>
-        <span className="min-w-0 flex-1 break-words text-sm">{name}</span>
-        {blocks.length > 0 && <TextExport locale={locale} content={() => blocks.map((block) => block.text).join("\n\n")} filename={name || "hyperpage-source"} />}
-        <IconTooltip label={t(locale, "closeResource")}><Button size="icon-sm" variant="ghost" aria-label={t(locale, "closeResource")} disabled={busy} onClick={() => void close()}><X /></Button></IconTooltip>
+    <SourceConversation
+      key={sourceId}
+      webSearchCapability={settings ? getTaskProvider(settings, "chat")?.capabilities.webSearch : undefined}
+      locale={locale}
+      source={conversationSource}
+      disabled={loading || !settings?.enabled}
+      onLocate={locate}
+      onError={notify.error}
+      onBusy={setChatBusy}
+      browsing={browsing}
+      onBrowseChange={setBrowsing}
+      resources={resourceList}
+      topActions={<>
+        <input ref={fileInput} type="file" accept=".pdf,.txt,.md,.markdown,image/png,image/jpeg,image/webp,image/gif,image/avif" className="hidden" aria-label={t(locale, "openLocalResource")} disabled={busy} onChange={(event) => {
+          const file = event.target.files?.[0]; event.target.value = ""; if (file) void open(file);
+        }} />
+        <IconTooltip label={t(locale, "openLocalResource")}><Button size="icon-sm" variant="ghost" aria-label={t(locale, "openLocalResource")} disabled={busy} onClick={() => fileInput.current?.click()}><FileUp /></Button></IconTooltip>
+        {embedded && <IconTooltip label={t(locale, "pageResources")}><Button size="icon-sm" variant="ghost" aria-label={t(locale, "pageResources")} aria-expanded={browsing} disabled={busy} onClick={() => { setBrowsing(!browsing); if (!browsing) void scan(); }}><FolderOpen /></Button></IconTooltip>}
       </>}
-    </div>
-    {passwordRequired && inputFile && <form className="flex shrink-0 items-end gap-2" onSubmit={(event) => { event.preventDefault(); void open(inputFile, password); }}>
-      <Field><FieldLabel htmlFor="pdf-password">{t(locale, "pdfPassword")}</FieldLabel><Input id="pdf-password" type="password" value={password} disabled={busy} autoComplete="off" onChange={(event) => setPassword(event.target.value)} /></Field>
-      <Button type="submit" disabled={busy || !password}>{t(locale, "openPdf")}</Button>
-    </form>}
-    {loading && <div role="status" className="flex shrink-0 items-center gap-2 text-sm"><Spinner />{loadProgress.total > 0 ? `${t(locale, "pdfReadingProgress")} ${loadProgress.completed} / ${loadProgress.total}` : t(locale, "readingResource")}</div>}
-    <SourceConversation key={sourceId} webSearchCapability={settings ? getTaskProvider(settings, "chat")?.capabilities.webSearch : undefined} locale={locale} source={conversationSource} disabled={loading || !settings?.enabled} onLocate={locate} onError={notify.error} onBusy={setChatBusy} browsing={browsing} onBrowseChange={setBrowsing} resources={resourceList}>
+      topContent={<>
+        {passwordRequired && inputFile && <form className="flex shrink-0 items-end gap-2" onSubmit={(event) => { event.preventDefault(); void open(inputFile, password); }}>
+          <Field><FieldLabel htmlFor="pdf-password">{t(locale, "pdfPassword")}</FieldLabel><Input id="pdf-password" type="password" value={password} disabled={busy} autoComplete="off" onChange={(event) => setPassword(event.target.value)} /></Field>
+          <Button type="submit" disabled={busy || !password}>{t(locale, "openPdf")}</Button>
+        </form>}
+        {loading && <div role="status" className="flex shrink-0 items-center gap-2 text-sm"><Spinner />{loadProgress.total > 0 ? `${t(locale, "pdfReadingProgress")} ${loadProgress.completed} / ${loadProgress.total}` : t(locale, "readingResource")}</div>}
+      </>}
+    >
       <section className="flex h-full min-h-0 min-w-0 flex-col gap-2" aria-label={t(locale, "documentSource")}>
+        {source && <div className="flex shrink-0 items-center gap-1">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium" title={name ?? undefined}>{name}</span>
+          {blocks.length > 0 && <TextExport locale={locale} content={() => blocks.map((block) => block.text).join("\n\n")} filename={name || "hyperpage-source"} />}
+          <IconTooltip label={t(locale, "closeResource")}><Button size="icon-sm" variant="ghost" aria-label={t(locale, "closeResource")} disabled={busy} onClick={() => void close()}><X /></Button></IconTooltip>
+        </div>}
         {source?.type === "image" ? <img src={source.image.dataUrl} alt={source.image.name} className="mx-auto max-h-full max-w-full object-contain" /> : source ? <>
           {pdf && pdf.outline.length > 0 && <nav aria-label={t(locale, "pdfOutline")} className="flex max-h-32 shrink-0 flex-col items-start gap-2 overflow-y-auto border-b pb-3">
             {pdf.outline.map((entry, index) => <button key={index} className="break-words text-left text-xs hover:underline disabled:opacity-50" style={{ paddingLeft: entry.depth * 12 }} disabled={entry.pageNumber === null} onClick={() => {

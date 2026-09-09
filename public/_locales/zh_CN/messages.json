@@ -3,7 +3,7 @@
     "message": "HyperPage AI"
   },
   "extensionDescription": {
-    "message": "用 AI 处理所选内容，或描述任务让 AI 操作网页。"
+    "message": "把网页、PDF 和 YouTube 字幕变成可提问的资料。阅读总结、选段翻译、智能写作、图片分析与网页自动操作，连接你自己的 AI 模型。"
   },
   "contextMenuEnable": {
     "message": "在网页中启用 HyperPage"

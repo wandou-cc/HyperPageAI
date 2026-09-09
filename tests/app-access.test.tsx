@@ -191,7 +191,11 @@ describe("floating panel page binding", () => {
     expect(document.querySelector("[data-selected-element-summary]")).toBeNull();
     expect(document.querySelector("iframe")).toBeNull();
 
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["对话", "资料", "写作", "工具", "任务"]);
+    const workspaceTabs = screen.getAllByRole("tab");
+    expect(workspaceTabs.map((tab) => tab.textContent)).toEqual(["对话", "资料", "写作", "工具", "任务"]);
+    expect(workspaceTabs.every((tab) => tab.querySelector("svg"))).toBe(true);
+    expect(document.querySelector("[data-main-navigation]")).not.toHaveClass("border-b");
+    expect(document.querySelector("[data-chat-composer]")).not.toHaveClass("border-t");
     fireEvent.click(screen.getByRole("tab", { name: "资料" }));
     const documents = screen.getByTitle("资料");
     expect(documents).toHaveAttribute("src", "chrome-extension://test/documents.html");
@@ -212,6 +216,7 @@ describe("floating panel page binding", () => {
     fireEvent.click(screen.getByRole("tab", { name: "写作" }));
     fireEvent.change(screen.getByRole("textbox", { name: "写作要求" }), { target: { value: "Writing draft" } });
     fireEvent.click(screen.getByRole("tab", { name: "工具" }));
+    expect(screen.queryByRole("button", { name: "网页翻译" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: "询问 AI" }), { target: { value: "Tool draft" } });
     fireEvent.click(screen.getByRole("tab", { name: "任务" }));
     fireEvent.change(screen.getByRole("textbox", { name: "页面任务" }), { target: { value: "Task draft" } });
@@ -661,7 +666,12 @@ describe("floating panel page binding", () => {
     fireEvent.change(input, { target: { value: "First question" } });
     fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
     expect(await screen.findByText("Response 1")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "重新生成回复" }));
+    const regenerate = screen.getByRole("button", { name: "重新生成回复" });
+    const responseActions = regenerate.closest("[data-response-actions]");
+    expect(responseActions).toContainElement(
+      screen.getByRole("button", { name: "复制回复" }),
+    );
+    fireEvent.click(regenerate);
     expect(await screen.findByText("Response 2")).toBeVisible();
     expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "replay-chat", request: { prompt: "First question", includeHistory: true, webSearch: false, history: [], snapshot: { type: "elements", pages: [page] } } }));
     expect(screen.queryByRole("button", { name: "移除资料" })).toBeNull();
@@ -773,36 +783,6 @@ describe("floating panel page binding", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
     await screen.findByText("Synthesis");
     expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "run-chat", request: { prompt: "Summarize", context: "page", history: [], includeHistory: true, webSearch: false, pageSelection: { snapshotId: "long", blockIds: ["1.1", "1.2"] } } }));
-  });
-
-  it("previews a webpage translation before applying it and exposes display and restore controls", async () => {
-    browserMock.storage.local.get.mockResolvedValue({ "hyperpage.settings": {
-      version: 4, enabled: true, locale: "zh_CN", resultDisplayMode: "floating", allowMultiTab: false,
-      provider: { baseUrl: "https://api.example.com/v1", apiKey: "secret", model: "model", supportsVision: false, targetLanguage: "简体中文" },
-    } });
-    const result = { snapshotId: "source", translations: [{ blockId: "1.1", text: "Translated passage" }] };
-    browserMock.runtime.sendMessage.mockImplementation(async (message: BackgroundRequest) => {
-      if (message.type === "reading-command") return { ok: true, data: { id: "source", title: "Article", url: "https://example.com", blocks: [{ id: "1.1", text: "Original passage", heading: "", headingLevel: null }] } };
-      if (message.type === "translate-page") return { ok: true, data: result };
-      if (message.type === "translation-command") return { ok: true, data: null };
-      return { ok: true, data: EMPTY_PAGE_STATE };
-    });
-    render(<TooltipProvider><App initialOpen /></TooltipProvider>);
-    await openTools();
-    fireEvent.click(screen.getByRole("button", { name: "网页翻译" }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新页面内容" }));
-    await screen.findByText("Article");
-    fireEvent.click(await screen.findByRole("button", { name: "翻译所选段落" }));
-    const apply = await screen.findByRole("button", { name: "显示双语页面" });
-    expect(browserMock.runtime.sendMessage.mock.calls.some(([message]) => message.type === "translation-command")).toBe(false);
-    fireEvent.click(apply);
-    const original = await screen.findByRole("button", { name: /^原文$/ });
-    expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({ target: "background", type: "translation-command", command: { type: "apply-translation", result } });
-    fireEvent.click(original);
-    await waitFor(() => expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({ target: "background", type: "translation-command", command: { type: "translation-mode", mode: "original" } }));
-    fireEvent.click(screen.getByRole("button", { name: "恢复页面" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "恢复页面" })).toBeNull());
-    expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({ target: "background", type: "translation-command", command: { type: "restore-translation" } });
   });
 
   it("keeps a selected local file private until a conversation request and sends only chosen paragraphs", async () => {

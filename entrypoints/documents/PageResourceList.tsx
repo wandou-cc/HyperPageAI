@@ -45,7 +45,17 @@ export function PageResourceList({ locale, catalog, scanning, disabled, error, o
             {resources.length === 0 ? <Empty><EmptyHeader><EmptyTitle>{t(locale, "noPageResources")}</EmptyTitle></EmptyHeader></Empty> : (
               <ul className="divide-y">
                 {resources.map((resource) => <li key={resource.id} className="flex min-w-0 items-center gap-2 py-3">
-                  <Icon className="size-4 shrink-0 text-muted-foreground" />
+                  {resource.kind === "image" && resource.url ? (
+                    <img
+                      src={resource.url}
+                      alt={resource.name}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-20 w-28 shrink-0 rounded-sm border object-contain"
+                    />
+                  ) : (
+                    <Icon className="size-4 shrink-0 text-muted-foreground" />
+                  )}
                   <div className="flex min-w-0 flex-1 flex-col gap-1">
                     <button type="button" className="break-words text-left text-sm font-medium hover:underline disabled:no-underline disabled:opacity-60" disabled={disabled || scanning || !resource.reader} onClick={() => onSelect(resource)}>{resource.name}</button>
                     <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">

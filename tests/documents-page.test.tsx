@@ -84,6 +84,12 @@ describe("source page", () => {
 
   it("discovers page resources on open and attaches selected text only after sending", async () => {
     render(<TooltipProvider><DocumentsPage embedded /></TooltipProvider>);
+    const history = screen.getByRole("button", { name: "History" });
+    const toolbar = history.closest("[data-conversation-toolbar]");
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "Open local file" }));
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "Page resources" }));
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "New chat" }));
+    expect(document.querySelector("[data-conversation-composer]")).not.toHaveClass("border-t");
     await screen.findByRole("button", { name: "Research notes" });
     expect(requestPageResource).toHaveBeenCalledWith({ type: "scan" }, expect.any(AbortSignal));
     expect(port.postMessage).not.toHaveBeenCalled();
@@ -106,10 +112,15 @@ describe("source page", () => {
     render(<TooltipProvider><DocumentsPage embedded /></TooltipProvider>);
     await screen.findByRole("tab", { name: "Images 1" });
     fireEvent.click(screen.getByRole("tab", { name: "Images 1" }));
+    expect(screen.getByRole("img", { name: "Revenue chart" })).toHaveAttribute(
+      "src",
+      "https://example.com/chart.png",
+    );
+    expect(requestPageResource).toHaveBeenCalledTimes(1);
     const image = { id: crypto.randomUUID(), name: "Revenue chart", dataUrl: `data:image/png;base64,${readFileSync("public/icon/32.png").toString("base64")}` };
     vi.mocked(requestPageResource).mockResolvedValueOnce({ type: "image", image });
     fireEvent.click(screen.getByRole("button", { name: "Revenue chart" }));
-    expect(await screen.findByRole("img", { name: "Revenue chart" })).toHaveAttribute("src", image.dataUrl);
+    await waitFor(() => expect(screen.getByRole("img", { name: "Revenue chart" })).toHaveAttribute("src", image.dataUrl));
     expect(screen.queryByRole("switch", { name: "Web search" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Explain this chart" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));

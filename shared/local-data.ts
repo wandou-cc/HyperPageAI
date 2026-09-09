@@ -1,5 +1,4 @@
 import { browser } from "wxt/browser";
-import { parseTranslationTerms, TRANSLATION_TERMS_STORAGE_KEY } from "./page-translation";
 import {
   PROMPT_TEMPLATES_STORAGE_KEY,
   parsePromptTemplates,
@@ -22,7 +21,6 @@ export const LOCAL_DATA_CATEGORIES = [
   "settings",
   "workflows",
   "templates",
-  "terms",
   "history",
   "conversations",
 ] as const;
@@ -51,7 +49,6 @@ function dataKeys(
       PROMPT_TEMPLATES_STORAGE_KEY in values
         ? [PROMPT_TEMPLATES_STORAGE_KEY]
         : [],
-    terms: TRANSLATION_TERMS_STORAGE_KEY in values ? [TRANSLATION_TERMS_STORAGE_KEY] : [],
     history:
       PAGE_AGENT_HISTORY_STORAGE_KEY in values
         ? [PAGE_AGENT_HISTORY_STORAGE_KEY]
@@ -102,7 +99,6 @@ export async function loadLocalData(): Promise<LocalDataSummary> {
       throw new Error("conversationsInvalid");
     return record;
   });
-  const terms = values[TRANSLATION_TERMS_STORAGE_KEY] === undefined ? null : parseTranslationTerms(values[TRANSLATION_TERMS_STORAGE_KEY]);
   const groups: LocalDataSummary["groups"] = {
     settings: { count: settings ? 1 : 0, bytes: 0, data: settingsData },
     workflows: { count: workflows.length, bytes: 0, data: workflows },
@@ -111,7 +107,6 @@ export async function loadLocalData(): Promise<LocalDataSummary> {
       bytes: 0,
       data: templates === null ? null : { version: 1, templates },
     },
-    terms: { count: terms?.length ?? 0, bytes: 0, data: terms === null ? null : { version: 1, terms } },
     history: { count: history.length, bytes: 0, data: history },
     conversations: {
       count: conversations.length,

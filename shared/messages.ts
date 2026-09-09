@@ -1,5 +1,4 @@
 import type { WritingOptions } from "./writing";
-import type { PageTranslationCommand, TranslatePageRequest } from "./page-translation";
 
 export type Locale = "zh_CN" | "en";
 
@@ -446,8 +445,6 @@ export type BackgroundRequest =
   | { target: "background"; type: "reading-command"; command: PageReadingCommand }
   | { target: "background"; type: "read-youtube-captions"; videoId: string }
   | { target: "background"; type: "editing-command"; command: PageEditingCommand }
-  | { target: "background"; type: "translation-command"; command: PageTranslationCommand }
-  | { target: "background"; type: "translate-page"; requestId: string; request: TranslatePageRequest }
   | { target: "background"; type: "capture-selection" }
   | {
       target: "background";

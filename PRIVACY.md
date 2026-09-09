@@ -26,8 +26,6 @@ When web search is enabled in a conversation, the prompt, completed conversation
 
 Writing requests include the selected readable text, writing mode, tone, approximate length and any additional requirements. Replacing or inserting text into an editable field requires the user's confirmation of the preview. Original contents and undo state remain only in page memory; undo refuses to overwrite subsequent edits. Confirmed edits become visible to the website and are subject to that website's own handling.
 
-Webpage translation sends selected snapshot paragraphs, the target language and the displayed terminology table to the text task's configured provider in multiple requests. The result is previewed before the user applies it to the webpage. Translations are inserted as text; original nodes are retained for display switching and restoration. These translations are visible to the website after application. Translation results remain in page memory and can be copied or exported. A terminology table is stored locally only when the user saves it and is included in local-data inspection, export and deletion.
-
 The image-analysis tool captures only after the user requests a preview. Capture rejects overlap with marked sensitive fields and embedded content and discards the screenshot if the source tab becomes inactive during capture. The user can crop the preview locally, inspect its dimensions and byte size, copy it or clear it. Image questions, OCR, chart analysis and interface analysis send only the final preview image and the chosen instruction to the configured vision provider after the user starts analysis. The full screenshot and earlier crop versions are not sent by this tool. Image previews remain in page memory and are not saved in conversation archives.
 
 When the user explicitly starts a page task, including a saved workflow, HyperPage AI sends the task description and repeatedly sends a simplified text representation of the current task-controlled page to the configured Base URL. That representation includes the current URL and title, visible page text, interactive-element metadata, and form state that the page exposes to the DOM. Questions generated during execution and the user's answers are also sent to the configured provider as part of that task. The provider returns structured actions that HyperPage AI uses to click, enter text, select options, scroll, modify or remove page elements, or, when the multi-tab preference is enabled, open and control task-owned tabs. Page tasks do not send screenshots and cannot execute model-generated JavaScript.
@@ -67,8 +65,6 @@ HyperPage AI 不运营应用服务器，也不要求用户注册账号。开发�
 在对话中启用联网搜索后，提问、已完成的对话历史及所选附件连同原生联网搜索工具请求发送至配置的服务：OpenAI 协议配置使用 Responses 联网搜索，Anthropic 配置使用 Claude 联网搜索，Gemini 配置使用 Google Search。服务商可能根据这些上下文生成查询并发送给其搜索服务。回答包含服务返回的来源链接。Responses 请求设置 `store: false`，服务商如何处理和保留数据仍受其自身政策约束。
 
 写作请求包含所选可读文字、写作类型、语气、近似长度和补充要求。替换可编辑内容或在光标处插入文字前，需要用户确认预览。原内容及撤销状态仅保留在页面内存中，撤销不会覆盖后续编辑。确认后的修改对网站可见，并受该网站自身的数据处理方式影响。
-
-正文翻译通过多次请求，将所选快照段落、目标语言和界面中的术语表发送至文本任务配置的服务。译文先供用户预览，由用户主动应用到网页。译文仅作为文字插入，原始节点保留用于切换显示和恢复页面；应用后的译文对网站可见。翻译结果仅保留在页面内存中，用户可复制或导出。术语表仅在用户主动保存后保存在本地，并支持本地数据查看、导出和清除。
 
 图片分析工具仅在用户主动请求预览后截取图片。截图范围与已标记的敏感字段或嵌入内容重叠时会阻止截取；截图期间来源标签页失去活动状态时，会弃用该截图。用户可在本地裁剪预览、查看尺寸及字节数、复制或清除图片。只有用户开始分析后，图片问答、OCR、图表分析和界面分析才会把最终预览图片及所选指令发送至视觉任务配置的服务；该工具不会发送完整屏幕截图或先前的裁剪版本。图片预览仅保留在页面内存中，不写入对话存档。
 

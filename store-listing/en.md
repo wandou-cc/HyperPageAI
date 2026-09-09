@@ -2,56 +2,96 @@
 
 ## Short description
 
-Ask AI, work with selected page content, or describe a task and let HyperPage operate webpages.
+Read webpages, PDFs and YouTube captions, translate, write, analyze images and automate page tasks with your own AI models.
 
 ## Description
 
-HyperPage AI combines a floating webpage toolkit with local PDF reading. Use your own AI service and choose the content attached to every request.
+HyperPage AI is your AI workspace for the web. Turn the content you are browsing into material you can ask questions about, and put AI to work on repetitive page tasks.
 
-- Click the toolbar icon to activate and open HyperPage only on the current page.
-- Click the toolbar icon again to close or reopen the panel, and drag the floating toolkit edges to adjust its width and height.
-- Enable or disable all webpage integration from the extension icon's context menu.
-- Select one text block, image, video frame, canvas, form field, or interface region.
-- Copy its readable text or visible screenshot.
-- Translate, explain, summarize, polish, and ask AI about a selected element.
-- Hold a multi-turn conversation with history included automatically, streamed replies and cancellation. Enable web search when the assigned model passes its check, with clickable sources in the answer.
-- Regenerate replies, edit and resend messages, and export results or conversations as Markdown or plain text.
-- Optionally save named conversations locally; search, group by webpage, rename, delete, import and export them.
-- Save multiple AI service/model configurations, assign models by task, and configure image-input and web-search capabilities. Search uses Responses `web_search`, Claude web search, or Gemini Google Search; Chat Completions configurations require a compatible Responses search endpoint.
-- Open the toolkit with Alt+Shift+H, extract structured page information and identify page types from selected content.
-- Inspect, export and clear saved data, view storage usage, and check or revoke website permissions.
-- Attach the current page, select one or more webpage excerpts, add local text or extract YouTube subtitles from the composer. Review and remove attachments before sending.
-- Import TXT and Markdown locally, select paragraphs and ask questions with file citations.
-- Discover documents, images and videos in Sources. Select supported PDF, text, image or subtitle resources to preview and ask questions; local files are also supported. PDFs provide an outline and page citations. Website access restrictions apply; unsupported resources offer their original link or page location.
-- Extract the first subtitle track provided for the current YouTube audio track. Switch between timestamped passages and body text for reading. Type questions about selected passages and jump to cited timestamps. The transcript panel and CC need not be enabled. Unavailable subtitles and access restrictions are reported; missing subtitles are never generated.
-- Preview and select page paragraphs, summarize them, extract key points or an outline, and ask questions with clickable source citations.
-- Combine explicitly selected element snapshots, with individual removal and source previews.
-- Translate page paragraphs with a saved terminology table, preview the result, switch between bilingual/original/translated views, and restore the page.
-- Preview and crop selected image regions for image questions, OCR, chart and interface analysis, with visible image dimensions and size before sending.
-- View selected character counts and send the complete selected text within the configured AI provider's context capacity. Large subtitle and document previews show visible passages as you scroll, with the complete extracted text retained for selection, export and citations.
-- Use Chat, Sources, Writing, Tools and Tasks in one panel with a shared AI composer and a direct conversation-history entry.
-- Extract text from visual content with a vision-capable model.
-- Show quick-action results in a floating window or insert them beside the source content.
-- Draft replies, continuations, rewrites, corrections, emails and comments with tone and length controls.
-- Preview differences, confirm field replacement or cursor insertion, and undo unchanged edits.
-- Describe a task and let AI click, type, select options, and scroll on the page.
-- Follow the active target through an on-page outline, simulated pointer, and click feedback.
-- Page tasks execute directly without approval prompts, pause for missing information, and can be stopped at any time.
-- Password, verification-code and payment fields identified by native semantics and standard autocomplete attributes are protected from reading and modification.
-- Optionally let a task open and control its own new tabs without accessing existing tabs.
-- Select multiple page elements while composing a task; each editable reference is inserted into the task.
-- See each task stage, browser action, and action result in a structured live status view.
-- Save, edit, delete, import and export named workflows, with template parameters and optional website scope.
-- Create prompt templates with categories and variables, and arrange favorite template shortcuts.
-- Review and manage the 20 most recent page-task execution records.
+Find the key points in a long article, translate a selected passage, ask questions about PDFs and video captions, draft an email in a webpage, or describe a task for AI to carry out. A floating browser toolkit brings reading, chat, translation, writing and page actions together, with less copying and switching between tools.
 
-Select OpenAI Chat Completions, OpenAI Responses, Anthropic Claude, or Google Gemini and configure its Base URL, API Key, and model in the extension-owned settings tab. Conversation requires SSE streaming, and page operation requires tool calling. HyperPage AI has no application backend, analytics, ads, or account requirement.
+Connect your own AI service and assign the models you choose to conversation and reading, writing, image analysis and page operation.
+
+### Read webpages and trace answers to the source
+
+- Attach the current page or select several webpage excerpts to discuss. Preview sources, original text and character counts before sending; select paragraphs or remove excerpts you do not need.
+- Turn long articles into summaries, key points, outlines or structured information. Select a term or passage for an explanation, translation or closer analysis.
+- Follow answer citations back to the corresponding content on the current page. Page reading uses visible text that the website has already loaded.
+- Browse documents, images and videos found on the page in Sources. Open supported resources for reading and questions, follow the original link or locate the resource on the page.
+
+### Ask questions about PDFs and text files
+
+- Open a PDF from a webpage or import a local PDF, TXT or Markdown file to read its extracted text in the browser.
+- Navigate PDF outlines, select passages and ask questions with page citations. Text files support paragraph selection and cited answers, too.
+- Ask AI to summarize an argument, explain a concept or extract information from the passages you select. Files are parsed locally; importing does not send them to AI. Submitting a question sends the selected extracted text and source information to your configured service.
+- Supports PDFs up to 20 MB and 500 pages, and UTF-8 TXT and Markdown files up to 10 MB. PDF reading requires extractable text and does not automatically OCR scanned pages.
+
+### Turn YouTube captions into reading material
+
+- Extract available captions on a YouTube watch page without opening the transcript panel or enabling CC.
+- Switch between timestamped passages and paragraph-style text, then select passages to discuss, summarize, translate or analyze.
+- Jump from an answer's time reference to that moment in the current video. Other webpage videos can use subtitles already loaded by their player.
+- YouTube extraction uses the first subtitle track available for the current audio track. Accessible captions must already exist; HyperPage does not download video or audio or generate missing subtitles.
+
+### Translate selected content
+
+- Translate or explain an individual selection with quick actions, showing results in a floating window or beside the source text.
+
+### Write, refine and use the result on the page
+
+- Draft replies, emails and comments. Continue, expand, shorten, rewrite or correct existing text, with controls for tone and target length.
+- Compare the original, result and text differences before confirming a replacement in a supported field or inserting at the cursor.
+- Undo an applied edit while its content remains unchanged. Copy or export answers, or insert them below a selected webpage element.
+
+### Understand images, charts and interfaces
+
+- Select a webpage image, current video frame, canvas or interface region. Preview and crop its visible area before analysis with a vision-capable model.
+- Ask image questions, recognize text with OCR, interpret charts, analyze interfaces or describe an image as a generation prompt.
+- Open supported webpage images or import local images in Sources for questions. Inspect the image before sending; the screenshot analysis tool also shows preview dimensions and file size.
+
+### Keep asking, with conversation and web search
+
+- Read streamed replies with completed conversation history and its attachments included automatically. Stop generation, regenerate a response or edit and resend a question.
+- Enable web search when your service and model support it to bring in information beyond the page, with clickable sources returned by the provider.
+- Save useful conversations, search by name or group by webpage, and reopen them to continue. Rename, delete, import or export conversation archives as JSON.
+- Export an individual result or a full conversation as Markdown or plain text for notes and further editing.
+
+### Describe a page task and let AI carry out the steps
+
+- Ask AI to click, type, select options and scroll, for tasks such as filling ordinary forms, setting filters or gathering information through page steps. Results depend on the website and model capabilities.
+- Reference several page elements while composing a task to identify its targets. Follow the active target, task stages, actions and results as execution progresses.
+- Tasks run directly once started and can submit forms, send, publish or delete content as instructed, without additional step-by-step confirmation. They ask for missing information and can be stopped at any time.
+- Save recurring tasks as named workflows, fill in template parameters and set allowed websites. Edit, import or export workflows, and review or manage the 20 most recent execution records.
+- Optionally enable multi-tab tasks to control the starting page and tabs the task creates, without accessing other existing tabs.
+
+### Your prompts, models and saved work
+
+- Create prompt templates with categories and variables. Favorite frequent prompts and arrange their shortcuts. A template fills the draft so you decide when to send it.
+- Save multiple service and model configurations, assign different models to different tasks, and configure image input and web search capabilities.
+- Use English or Simplified Chinese menus and choose an output language. Resize the floating toolkit and toggle it with the toolbar icon or Alt+Shift+H.
+- Inspect saved data and actual storage usage. Preview, export or clear data by category, and review or revoke website access.
+
+### Privacy and website access
+
+HyperPage AI requires no HyperPage account and has no ads, analytics or application backend receiving your requests. AI requests go directly to your configured service, which handles their content under its own policies.
+
+Settings and saved data stay in the current Chrome profile. Conversations remain in the current page session unless you explicitly save them locally. Conversation archives and local-data previews and exports exclude API keys.
+
+You activate the toolkit on the current page and grant access to your AI service as needed. Broad HTTP/HTTPS access is requested when you enable multi-tab tasks. Page tasks send the page text and interaction information they need to the configured service. Native password fields and password, verification-code and payment fields marked with standard autocomplete attributes cannot be read or modified; unmarked sensitive content is outside this detection scope.
+
+### Requirements and supported content
+
+Requires Chrome 116 or newer and your own AI service Base URL, API key and model. Supports OpenAI Chat Completions, OpenAI Responses, Anthropic Claude and Google Gemini protocols, including compatible service endpoints.
+
+Conversation, writing and text actions require streaming responses; page tasks require tool calling; image analysis requires image input. Web search requires a supported provider endpoint. Chat Completions configurations also need a compatible Responses search endpoint, and image conversations do not support web search. Selected text must fit the model's context capacity.
+
+Webpage tools work on accessible HTTP/HTTPS pages, excluding Chrome internal pages. Online resources remain subject to website access restrictions. Office document parsing, encrypted video parsing and missing-caption generation are unsupported, and some complex editors cannot accept direct text insertion.
 
 ## Permission justification
 
 - `activeTab`: temporarily accesses only the current page after the user clicks the toolbar icon.
 - `scripting`: injects the HyperPage interface and page controller into that explicitly activated page.
 - Optional website access: requests the configured AI service host for model requests. Full HTTP/HTTPS access is requested only when the user enables multi-tab tasks, so task-created tabs can be operated.
-- `storage`: keeps provider settings, preferences, saved workflows, the 20 most recent page-task execution records, and explicitly saved conversations in the current Chrome profile.
-- `clipboardWrite`: copies selected text, screenshots, and AI results.
+- `storage`: keeps provider settings, preferences, prompt templates, saved workflows, the 20 most recent page-task execution records, and explicitly saved conversations in the current Chrome profile.
+- `clipboardWrite`: writes selected text, screenshots and AI results only when the user requests a copy; it does not read the clipboard.
 - `contextMenus`: adds the enable switch to the HyperPage AI toolbar icon's context menu.

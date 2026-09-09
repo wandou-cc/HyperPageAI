@@ -12,7 +12,6 @@ HyperPage AI is a Chrome extension for asking AI questions, working with selecte
 - Enable or disable all webpage integration from the extension icon's context menu.
 - Copy readable text or the selected visible region as an image.
 - Translate, explain, summarize, polish, extract text, or ask AI about a selected element.
-- Translate selected page paragraphs using a target language and terminology table. Preview the result, apply a bilingual page, switch between original/bilingual/translated views, or restore the page. Original nodes and website edits are preserved.
 - Continue a multi-turn conversation with completed history included automatically, streamed replies and cancellation.
 - Enable web search for a configured model and use the search toggle in the chat composer. Search answers include provider-returned source links. Search uses Responses `web_search`, Claude web search, or Gemini Google Search according to the selected protocol; Chat Completions configurations require a compatible Responses endpoint for search.
 - Regenerate replies or edit and resend a message with its original attached content.
@@ -87,7 +86,6 @@ Click the HyperPage AI toolbar icon, then open **Settings**. Configuration opens
 - PDF, text-file, image and video-subtitle snapshots follow the same explicit-saving rule. Saved image conversations include normalized PNG attachments. Original PDF bytes, passwords and rendered PDF pages are not saved in conversations. PDF citations locate the current unchanged document snapshot; citations from reopened archives may be unavailable.
 - Page reading includes currently loaded, visible text outside the viewport, excludes form values and editable areas, and does not load more content or read embedded frames. Refresh page content explicitly to capture changes. Navigation invalidates existing reading snapshots.
 - Image actions require the assigned image model's image-input capability to be available.
-- Webpage translation uses the text task's assigned model and requires text and streaming capabilities. It translates the selected reading range in one request while preserving every selected paragraph. Saved terminology supports up to 100 unique source terms and is available in local-data inspection, export and deletion.
 - Output language: choose one of the available languages; the default is `Simplified Chinese`.
 - Quick action results: choose `Floating window` or `Insert in page`.
 - Local data: inspect saved data by category, export JSON, or confirm deletion. Clearing saved data does not clear live conversation memory or revoke Chrome website permissions.

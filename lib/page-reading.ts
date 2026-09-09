@@ -201,10 +201,6 @@ export class PageReading {
     return target;
   }
 
-  getBlockNodes(snapshotId: string, blockId: string): Text[] {
-    return this.getTarget(snapshotId, blockId).nodes;
-  }
-
   locate(snapshotId: string, blockId: string): void {
     const target = this.getTarget(snapshotId, blockId);
     const first = target.nodes[0];

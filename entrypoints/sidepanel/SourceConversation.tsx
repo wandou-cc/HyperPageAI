@@ -1,11 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import {
-  ArrowLeft,
   Copy,
-  History,
   Pencil,
-  Plus,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -54,6 +51,7 @@ import { TextExport } from "../sidepanel/TextExport";
 import { IconTooltip } from "../sidepanel/ui";
 import { WebSearchToggle } from "./WebSearchToggle";
 import { AiComposer } from "./AiComposer";
+import { ConversationActions } from "./ConversationActions";
 import type { ResourceSource } from "../../shared/page-resources";
 import type { CapabilityResult } from "../../shared/messages";
 import { formatError, t } from "../sidepanel/translations";
@@ -68,6 +66,8 @@ export function SourceConversation({
   webSearchCapability,
   children,
   resources,
+  topActions,
+  topContent,
   browsing = false,
   onBrowseChange,
 }: {
@@ -80,6 +80,8 @@ export function SourceConversation({
   webSearchCapability?: CapabilityResult;
   children: ReactNode;
   resources?: ReactNode;
+  topActions?: ReactNode;
+  topContent?: ReactNode;
   browsing?: boolean;
   onBrowseChange?: (browsing: boolean) => void;
 }) {
@@ -268,34 +270,17 @@ export function SourceConversation({
       onValueChange={setView}
       className="min-h-0 min-w-0 flex-1 gap-3"
     >
-      <div className="flex shrink-0 flex-wrap items-center gap-1">
-        {library ? <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{t(locale, "savedConversations")}</h2> : (
-          <TabsList variant="line" hidden={!turns.length || browsing}>
-            <TabsTrigger value="source">{t(locale, "documentSource")}</TabsTrigger>
-            <TabsTrigger value="answer">{t(locale, "documentAnswers")}</TabsTrigger>
-          </TabsList>
-        )}
+      <div className="flex shrink-0 flex-wrap items-center gap-1" data-conversation-toolbar>
+        {topActions}
         <div className="ml-auto flex items-center gap-1">
           {turns.length > 0 && <TextExport locale={locale} filename="hyperpage-document-conversation" disabled={blocked} content={() => conversationToMarkdown(turns, { user: t(locale, "userMessage"), assistant: t(locale, "assistant"), incomplete: t(locale, "generationIncomplete") })} />}
-        <IconTooltip label={t(locale, library ? "backToConversation" : "conversationHistory")}>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={t(locale, library ? "backToConversation" : "conversationHistory")}
-            aria-expanded={library}
+          <ConversationActions
+            locale={locale}
+            libraryOpen={library}
             disabled={blocked}
-            onClick={() => setLibrary(!library)}
-          >
-            {library ? <ArrowLeft /> : <History />}
-          </Button>
-        </IconTooltip>
-        <IconTooltip label={t(locale, "newConversation")}>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={t(locale, "newConversation")}
-            disabled={blocked || !turns.length}
-            onClick={() => {
+            newDisabled={blocked || !turns.length}
+            onToggleLibrary={() => setLibrary(!library)}
+            onNew={() => {
               setTurns([]);
               setSaved(null);
               setEditing(null);
@@ -303,12 +288,18 @@ export function SourceConversation({
               setLibrary(false);
               setView("source");
             }}
-          >
-            <Plus />
-          </Button>
-        </IconTooltip>
+          />
         </div>
       </div>
+      {topContent}
+      {library ? (
+        <h2 className="min-w-0 truncate text-sm font-medium">{t(locale, "savedConversations")}</h2>
+      ) : (
+        <TabsList variant="line" className="w-full shrink-0" hidden={!turns.length || browsing}>
+          <TabsTrigger value="source">{t(locale, "documentSource")}</TabsTrigger>
+          <TabsTrigger value="answer">{t(locale, "documentAnswers")}</TabsTrigger>
+        </TabsList>
+      )}
       {library ? <div className="min-h-0 flex-1 overflow-y-auto">
         <ConversationLibrary
           locale={locale}
@@ -447,7 +438,7 @@ export function SourceConversation({
       </MessageScrollerProvider>
       </TabsContent>
       </div>}
-      <div className="flex max-h-[60%] shrink-0 flex-col gap-2 overflow-y-auto border-t pt-3">
+      <div className="flex max-h-[60%] shrink-0 flex-col gap-2 overflow-y-auto pt-3" data-conversation-composer>
       {editing !== null && (
         <div className="flex items-center justify-between text-xs">
           <span>{t(locale, "editingMessage")}</span>
