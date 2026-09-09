@@ -986,6 +986,30 @@ describe("floating panel page binding", () => {
     });
     expect(await screen.findByText("正在等待你回答")).toBeVisible();
     expect(screen.getByText("确定要提交这个表单吗？")).toBeVisible();
+    const panel = document.querySelector("#hyperpage-tool-panel");
+    const header = panel?.querySelector("header");
+    if (!panel || !header) {
+      throw new Error("Floating panel header was not rendered");
+    }
+    const settingsButton = within(header).getByRole("button", {
+      name: "设置",
+    });
+    const closeButton = within(header).getByRole("button", {
+      name: "关闭 HyperPage AI",
+    });
+    expect(settingsButton).toBeEnabled();
+    expect(closeButton).toBeEnabled();
+    fireEvent.click(settingsButton);
+    await waitFor(() => {
+      expect(browserMock.runtime.sendMessage).toHaveBeenCalledWith({
+        target: "background",
+        type: "open-settings",
+      });
+    });
+    fireEvent.click(closeButton);
+    expect(panel).not.toBeVisible();
+    act(() => handlePanelEvent({ target: "panel", type: "toggle-panel" }));
+    expect(panel).toBeVisible();
     fireEvent.change(screen.getByRole("textbox", { name: "你的回答" }), {
       target: { value: "确认提交" },
     });
@@ -1653,6 +1677,7 @@ describe("floating panel page binding", () => {
     await screen.findByRole("button", { name: "添加资料" });
     const panel = document.querySelector<HTMLElement>("#hyperpage-tool-panel");
     if (!panel) throw new Error("Floating panel was not rendered");
+    expect(panel).toHaveStyle({ width: "480px", height: "768px" });
     vi.spyOn(panel, "getBoundingClientRect").mockReturnValue({
       x: 404,
       y: 200,

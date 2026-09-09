@@ -1754,7 +1754,21 @@ describe("page agent tasks", () => {
     });
   });
 
-  it("waits for an answer from the task's source tab before continuing", async () => {
+  it("releases page control while waiting for an answer and then resumes", async () => {
+    const interactionMaskCommands = (): Array<
+      "show-mask" | "hide-mask" | "dispose"
+    > =>
+      browserMock.tabs.sendMessage.mock.calls.flatMap(([, message]) => {
+        if (
+          message.target !== "page-agent-content" ||
+          !["show-mask", "hide-mask", "dispose"].includes(
+            message.command?.type,
+          )
+        ) {
+          return [];
+        }
+        return [message.command.type];
+      });
     browserMock.storage.local.get.mockResolvedValue({
       "hyperpage.settings": {
         version: 4,
@@ -1828,6 +1842,7 @@ describe("page agent tasks", () => {
         },
       });
     });
+    expect(interactionMaskCommands()).toEqual(["show-mask", "hide-mask"]);
     await expect(
       handleBackgroundRequest(
         {
@@ -1877,6 +1892,13 @@ describe("page agent tasks", () => {
         durationMs: expect.any(Number),
       },
     });
+    expect(interactionMaskCommands()).toEqual([
+      "show-mask",
+      "hide-mask",
+      "show-mask",
+      "hide-mask",
+      "dispose",
+    ]);
 
     fetchMock.mockResolvedValueOnce(
       createPageAgentToolResponse({
@@ -1915,6 +1937,17 @@ describe("page agent tasks", () => {
       ok: false,
       error: "requestCancelled",
     });
+    expect(interactionMaskCommands()).toEqual([
+      "show-mask",
+      "hide-mask",
+      "show-mask",
+      "hide-mask",
+      "dispose",
+      "show-mask",
+      "hide-mask",
+      "hide-mask",
+      "dispose",
+    ]);
     await expect(
       handleBackgroundRequest(
         {

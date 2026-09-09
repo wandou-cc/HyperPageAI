@@ -1335,12 +1335,17 @@ async function runPageAgentTask(
   });
   agent.onAskUser = async (question, options) => {
     if (!options) throw new Error("pageAgentQuestionSignalRequired");
+    await remoteController.hideMask();
     reportProgress({
       phase: "awaiting-user",
       stepIndex: currentStepIndex,
       question,
     });
-    return waitForPageAgentAnswer(tab.id, requestId, options.signal);
+    try {
+      return await waitForPageAgentAnswer(tab.id, requestId, options.signal);
+    } finally {
+      if (!options.signal.aborted) await remoteController.showMask();
+    }
   };
   const handleActivity = (event: Event): void => {
     const activity = (event as CustomEvent<AgentActivity>).detail;

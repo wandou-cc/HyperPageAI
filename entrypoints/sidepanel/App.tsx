@@ -246,8 +246,9 @@ interface PanelHeightResizeSession {
 const VIEWPORT_EDGE_GAP = 8;
 const DRAG_START_DISTANCE = 4;
 const PANEL_MIN_WIDTH = 320;
-const PANEL_DEFAULT_WIDTH = 420;
+const PANEL_DEFAULT_WIDTH = 480;
 const PANEL_MIN_HEIGHT = 280;
+const PANEL_DEFAULT_HEIGHT = 800;
 
 const EMPTY_PAGE_STATE: PageState = {
   selection: null,
@@ -653,7 +654,7 @@ export function App({ initialOpen }: AppProps) {
     Math.min(PANEL_DEFAULT_WIDTH, window.innerWidth - 32),
   );
   const [panelHeight, setPanelHeight] = useState(() =>
-    Math.min(720, window.innerHeight - 32),
+    Math.min(PANEL_DEFAULT_HEIGHT, window.innerHeight - 32),
   );
   const [panelPosition, setPanelPosition] = useState<FloatingPosition>();
   const [panelDragging, setPanelDragging] = useState(false);
@@ -1795,6 +1796,10 @@ export function App({ initialOpen }: AppProps) {
     customPromptInputRef.current?.focus();
   }
 
+  const pageAgentAwaitingUser =
+    pending?.action === "operate-page" &&
+    pageAgentRun?.current.phase === "awaiting-user";
+
   async function openSettings(): Promise<void> {
     try {
       await sendBackgroundRequest<null>({ target: "background", type: "open-settings" });
@@ -1807,7 +1812,7 @@ export function App({ initialOpen }: AppProps) {
 
   // Changes only this page's panel state after the page has been activated.
   function handlePanelOpenChange(open: boolean): void {
-    if (!open && pending) return;
+    if (!open && pending && !pageAgentAwaitingUser) return;
     setPanelOpen(open);
   }
 
@@ -1832,7 +1837,7 @@ export function App({ initialOpen }: AppProps) {
                   }
                 : undefined
             }
-            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-4 flex min-h-24 max-h-[calc(100dvh-32px)] w-[min(420px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
+            className="hp-panel hp-panel-drag-handle pointer-events-auto fixed right-4 bottom-4 flex min-h-24 max-h-[calc(100dvh-32px)] w-[min(480px,calc(100vw-32px))] items-center justify-center rounded-md border bg-background p-3 text-muted-foreground"
             onPointerDown={handlePanelPointerDown}
             onPointerMove={handlePanelPointerMove}
             onPointerUp={handlePanelPointerEnd}
@@ -1973,7 +1978,7 @@ export function App({ initialOpen }: AppProps) {
                     size="icon-sm"
                     variant="ghost"
                     aria-label={t(locale, "settings")}
-                    disabled={Boolean(pending)}
+                    disabled={Boolean(pending) && !pageAgentAwaitingUser}
                     onClick={openSettings}
                   >
                     <Settings />
@@ -1985,7 +1990,7 @@ export function App({ initialOpen }: AppProps) {
                   size="icon-sm"
                   variant="ghost"
                   aria-label={t(locale, "closePanel")}
-                  disabled={Boolean(pending)}
+                  disabled={Boolean(pending) && !pageAgentAwaitingUser}
                   onClick={() => handlePanelOpenChange(false)}
                 >
                   <X />
